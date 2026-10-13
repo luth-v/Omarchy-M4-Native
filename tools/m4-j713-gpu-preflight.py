@@ -29,43 +29,24 @@ def f32(value):
     return struct.unpack('<f', struct.pack('<f', value))[0]
 
 
-def u32(node, name, default=None):
+class BootAbort(Exception):
+    """A table on which m1n1 stage 2 bails out of the whole boot."""
+
+
+def u32(node, name, reason, default=None):
     value = node.get(name)
-    if value is None:
+    if value is None and default is not None:
         return default
     if not isinstance(value, bytes) or len(value) != 4:
-        raise ValueError('invalid ' + name)
+        raise BootAbort(reason)
     return struct.unpack('<I', value)[0]
 
 
 def states(node, name, count):
     value = node.get(name)
     if not isinstance(value, bytes) or len(value) != count * 8:
-        raise ValueError('incomplete ' + name)
+        raise BootAbort('incomplete performance tables')
     return [struct.unpack_from('<II', value, offset) for offset in range(0, len(value), 8)]
-
-
-def group(core, sram):
-    """Mirror m1n1's voltage grouping; return (groups, abort reason or None)."""
-    groups = []
-    first = 0
-    while first < len(core):
-        last = first
-        while last + 1 < len(core) and core[last + 1][1] == core[first][1]:
-            last += 1
-        rows = range(first, last + 1)
-        for row in rows:
-            if (core[row][0] != sram[row][0] or sram[row][1] != sram[first][1] or
-                    core[row][0] % 1000000):
-                return groups, 'inconsistent performance row %d' % row
-        if first and core[first][1] <= core[first - 1][1]:
-            return groups, 'unordered voltage steps'
-        high = max(rows, key=lambda row: core[row][0])
-        groups.append({'mhz': core[high][0] // 1000000, 'mv': core[first][1]})
-        first = last + 1
-    if len(groups) not in (10, 11):
-        return groups, 'unsupported voltage step count %d' % len(groups)
-    return groups, None
 
 
 def predicted_power(mhz, mv, cores, higher_ma):
@@ -80,27 +61,84 @@ def predicted_power(mhz, mv, cores, higher_ma):
     return int(f32(voltage * f32(maximum)))
 
 
-def evaluate(node, cores, gate_max_power=QUALIFIED['max_power_mw'], exact_power=True):
-    count = u32(node, 'perf-state-count')
-    tables = u32(node, 'perf-state-table-count')
-    report = {'cores': cores, 'boot_abort': None, 'gpu_failures': [], 'unknown': []}
+def derive(node, cores):
+    """Walk dt_set_gpu_t8132_perf in m1n1's order; raise BootAbort at each bail.
+
+    Returns the voltage groups ({'mhz', 'mv'}), the top-state power (None when
+    it depends on the leakage fuse) and what could not be decided from macOS.
+    """
+    count = u32(node, 'perf-state-count', 'unsupported performance table geometry')
+    tables = u32(node, 'perf-state-table-count', 'unsupported performance table geometry')
     if tables != 1 or not count or count > MAX_PSTATES:
-        report['boot_abort'] = 'unsupported performance table geometry'
-        return report
-    groups, abort = group(states(node, 'perf-states', count),
-                          states(node, 'perf-states-sram', count))
-    report['groups'] = len(groups)
-    if abort:
-        report['boot_abort'] = abort
+        raise BootAbort('unsupported performance table geometry')
+    core = states(node, 'perf-states', count)
+    sram = states(node, 'perf-states-sram', count)
+
+    groups = []
+    first = 0
+    while first < count:
+        last = first
+        while last + 1 < count and core[last + 1][1] == core[first][1]:
+            last += 1
+        rows = range(first, last + 1)
+        for row in rows:
+            if (core[row][0] != sram[row][0] or sram[row][1] != sram[first][1] or
+                    core[row][0] % 1000000):
+                raise BootAbort('inconsistent performance row %d' % row)
+        if first and core[first][1] <= core[first - 1][1]:
+            raise BootAbort('unordered voltage steps')
+        high = max(rows, key=lambda row: core[row][0])
+        groups.append({'mhz': core[high][0] // 1000000, 'mv': core[first][1]})
+        first = last + 1
+    if len(groups) not in (10, 11):
+        raise BootAbort('unsupported voltage step count %d' % len(groups))
+
+    if cores not in (8, 10):
+        raise BootAbort('unsupported GPU core count %d' % cores)
+    base = u32(node, 'gpu-perf-base-pstate', 'invalid base performance state', 1)
+    higher_ma = bool(u32(node, 'gpu-supports-higher-mA', 'invalid current-limit selector', 0))
+    # m4_power_mw: the core count was checked above and the leakage fuse
+    # field always decodes to 2..16384, so only the voltage can be rejected.
+    for item in groups:
+        if not item['mv'] or item['mv'] > 2000:
+            raise BootAbort('invalid power inputs (%d mV)' % item['mv'])
+
+    # m4_relative_tables. A zero frequency gives zero power, so
+    # "power[0] || frequency[0]" reduces to frequency[0]. Voltage rises
+    # strictly between groups, so power cannot fall where frequency rises.
+    unknown = []
+    mhz = [item['mhz'] for item in groups]
+    top = groups[-1]
+    if not base or base >= len(groups):
+        raise BootAbort('invalid transfer tables (base performance state %d)' % base)
+    if mhz[0]:
+        raise BootAbort('invalid transfer tables (lowest frequency %d MHz)' % mhz[0])
+    power = predicted_power(top['mhz'], top['mv'], cores, higher_ma)
+    if power is None:
+        unknown.append('maximum power depends on the leakage fuse')
+        voltage = f32(top['mv'] / 1000.0)
+        if voltage * (voltage ** 1.2) * 18.2 * top['mhz'] * (cores / 10.0) < 1.001:
+            unknown.append('whether the top power is non-zero depends on the leakage fuse')
+    elif not power:
+        raise BootAbort('invalid transfer tables (zero top power)')
+    if base < len(groups) - 1 and mhz[-1] <= mhz[base]:
+        raise BootAbort('invalid transfer tables (top frequency not above the base state)')
+    for i in range(1, len(mhz)):
+        if mhz[i] <= mhz[i - 1]:
+            raise BootAbort('invalid transfer tables (unordered frequency at group %d)' % i)
+    return groups, power, unknown
+
+
+def evaluate(node, cores, gate_max_power=QUALIFIED['max_power_mw'], exact_power=True):
+    report = {'cores': cores, 'boot_abort': None, 'gpu_failures': [], 'unknown': [],
+              'groups': None, 'top_mhz': None, 'top_mv': None, 'max_power_mw': None}
+    try:
+        groups, power, report['unknown'] = derive(node, cores)
+    except BootAbort as error:
+        report['boot_abort'] = str(error)
         return report
     top = groups[-1]
-    report.update(top_mhz=top['mhz'], top_mv=top['mv'])
-    if cores not in (8, 10):
-        report['boot_abort'] = 'unsupported GPU core count %d' % cores
-        return report
-    higher_ma = bool(u32(node, 'gpu-supports-higher-mA', 0))
-    power = predicted_power(top['mhz'], top['mv'], cores, higher_ma)
-    report['max_power_mw'] = power
+    report.update(groups=len(groups), top_mhz=top['mhz'], top_mv=top['mv'], max_power_mw=power)
 
     if cores != 10:
         report['gpu_failures'].append('core mask for %d cores is not 0x3ff' % cores)
@@ -110,9 +148,8 @@ def evaluate(node, cores, gate_max_power=QUALIFIED['max_power_mw'], exact_power=
     if top['mhz'] != QUALIFIED['top_mhz']:
         report['gpu_failures'].append('top frequency %d MHz, module requires %d'
                                       % (top['mhz'], QUALIFIED['top_mhz']))
-    if power is None:
-        report['unknown'].append('maximum power depends on the leakage fuse')
-    elif power > gate_max_power or (exact_power and power != gate_max_power):
+    if power is not None and (power > gate_max_power or
+                              (exact_power and power != gate_max_power)):
         report['gpu_failures'].append('maximum power %d mW, module requires %s%d'
                                       % (power, '' if exact_power else 'at most ',
                                          gate_max_power))

@@ -62,13 +62,8 @@ class GpuPreflightTests(unittest.TestCase):
         self.assertIn('core mask for 8 cores is not 0x3ff', report['gpu_failures'])
 
     def test_unclamped_power_is_reported_as_unknown(self):
-        node = copy.deepcopy(self.node)
-        for name in ('perf-states', 'perf-states-sram'):
-            rows = table(node, name)
-            rows[-1][0] = 1300 * 1000000
-            rows[-2][0] = 1290 * 1000000
-            node[name] = pack(rows)
-        report = preflight.evaluate(node, 8)
+        # Eight cores keep the dynamic current below the clamp.
+        report = preflight.evaluate(self.node, 8)
         self.assertIsNone(report['max_power_mw'])
         self.assertEqual(report['unknown'], ['maximum power depends on the leakage fuse'])
 
@@ -93,12 +88,86 @@ class GpuPreflightTests(unittest.TestCase):
         self.assertEqual(preflight.evaluate(self.node, 9)['boot_abort'],
                          'unsupported GPU core count 9')
 
-    def test_truncated_table_is_an_error(self):
+    def edited(self, edit):
         node = copy.deepcopy(self.node)
-        node['perf-states'] = node['perf-states'][:-8]
-        with self.assertRaisesRegex(ValueError, 'incomplete perf-states'):
-            preflight.evaluate(node, 10)
+        for name in ('perf-states', 'perf-states-sram'):
+            rows = table(node, name)
+            edit(name, rows)
+            node[name] = pack(rows)
+        return node
 
+    def assertAborts(self, node, reason):
+        report = preflight.evaluate(node, 10)
+        self.assertEqual(report['boot_abort'], reason)
+        self.assertEqual(report['gpu_failures'], [])
+
+    def test_incomplete_tables_abort_the_boot(self):
+        for name, value, reason in (
+                ('perf-states', None, 'incomplete performance tables'),
+                ('perf-states-sram', 'short', 'incomplete performance tables'),
+                ('perf-state-count', None, 'unsupported performance table geometry'),
+                ('perf-state-table-count', b'\x01\x00', 'unsupported performance table geometry')):
+            with self.subTest(name=name, value=value):
+                node = copy.deepcopy(self.node)
+                if value is None:
+                    del node[name]
+                else:
+                    node[name] = node[name][:-8] if value == 'short' else value
+                self.assertAborts(node, reason)
+
+    def test_base_performance_state(self):
+        for value, reason in ((b'\x01\x00', 'invalid base performance state'),
+                              (struct.pack('<I', 0), 'invalid transfer tables (base performance state 0)'),
+                              (struct.pack('<I', 10), 'invalid transfer tables (base performance state 10)'),
+                              (struct.pack('<I', 3), None)):
+            with self.subTest(value=value):
+                node = copy.deepcopy(self.node)
+                node['gpu-perf-base-pstate'] = value
+                self.assertEqual(preflight.evaluate(node, 10)['boot_abort'], reason)
+
+    def test_current_limit_selector(self):
+        node = copy.deepcopy(self.node)
+        node['gpu-supports-higher-mA'] = b'\x01'
+        self.assertAborts(node, 'invalid current-limit selector')
+        node['gpu-supports-higher-mA'] = struct.pack('<I', 1)
+        report = preflight.evaluate(node, 10)
+        self.assertIsNone(report['boot_abort'])
+        self.assertEqual(report['unknown'], ['maximum power depends on the leakage fuse'])
+
+    def test_group_voltage_outside_the_power_model(self):
+        def zero(name, rows):
+            if name == 'perf-states':
+                rows[0][1] = 0
+        self.assertAborts(self.edited(zero), 'invalid power inputs (0 mV)')
+        self.assertAborts(self.with_top_voltage(2001), 'invalid power inputs (2001 mV)')
+
+    def test_transfer_tables_that_make_m1n1_abort_the_boot(self):
+        def lowest(name, rows):
+            rows[0][0] = 100 * 1000000
+
+        def unordered(name, rows):
+            rows[3][0] = 600 * 1000000
+
+        def flat_top(name, rows):
+            rows[14][0] = rows[15][0] = 1338 * 1000000
+        self.assertAborts(self.edited(lowest), 'invalid transfer tables (lowest frequency 100 MHz)')
+        self.assertAborts(self.edited(unordered),
+                          'invalid transfer tables (unordered frequency at group 3)')
+        node = self.edited(flat_top)
+        self.assertAborts(node, 'invalid transfer tables (unordered frequency at group 9)')
+        node['gpu-perf-base-pstate'] = struct.pack('<I', 8)
+        self.assertAborts(node, 'invalid transfer tables (top frequency not above the base state)')
+
+    def test_tiny_top_power_is_reported_as_unknown(self):
+        rows = [(mhz * 1000000, mv) for mhz, mv in zip(range(10), range(1, 11))]
+        node = {'perf-state-count': struct.pack('<I', 10),
+                'perf-state-table-count': struct.pack('<I', 1),
+                'perf-states': pack(rows), 'perf-states-sram': pack(rows)}
+        report = preflight.evaluate(node, 10)
+        self.assertIsNone(report['boot_abort'])
+        self.assertEqual(report['unknown'],
+                         ['maximum power depends on the leakage fuse',
+                          'whether the top power is non-zero depends on the leakage fuse'])
 
 if __name__ == '__main__':
     unittest.main()
