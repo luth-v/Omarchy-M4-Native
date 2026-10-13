@@ -42,6 +42,20 @@ esac
     def test_missing_scanout_still_fails(self):
         self.assertNotEqual(self.pre_start(False).returncode, 0)
 
+    def test_failure_diagnostics_reach_the_journal(self):
+        lines = (ROOT / 'packaging/j713-startup/m4-gpu.service').read_text().splitlines()
+        self.assertFalse([line for line in lines if line.startswith(('StandardOutput=', 'StandardError='))])
+        self.assertIn('ExecStart=/usr/bin/bash -x /usr/local/bin/m4-gpu-start', lines)
+        post = [line.split('=', 1)[1] for line in lines if line.startswith('ExecStopPost=')]
+        self.assertEqual(len(post), 1)
+        self.assertTrue(post[0].startswith('-/usr/bin/sh -c '))
+        # systemd expands $NAME itself; every shell variable must be escaped as $$.
+        self.assertNotRegex(post[0].replace('$$', ''), r'\$')
+        self.assertNotIn('\\', post[0])
+        for name in ('SERVICE_RESULT', 'm4-max-power-mw', 'm4-core-mask',
+                     'apple,firmware-build', 'dmesg'):
+            self.assertIn(name, post[0])
+
 
 if __name__ == '__main__':
     unittest.main()

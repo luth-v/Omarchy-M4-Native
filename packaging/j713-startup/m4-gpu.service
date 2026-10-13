@@ -7,8 +7,10 @@ Before=display-manager.service
 [Service]
 Type=oneshot
 ExecStartPre=/usr/bin/udevadm wait --timeout=10 /dev/dri/card0
-ExecStart=/usr/local/bin/m4-gpu-start
+# Trace each check into the journal so a failure names the step that stopped.
+ExecStart=/usr/bin/bash -x /usr/local/bin/m4-gpu-start
+# The G16 probe can fail with -22 without its own message. Record the loader's
+# GPU constants and the driver's kernel lines on failure.
+ExecStopPost=-/usr/bin/sh -c '[ "$$SERVICE_RESULT" = success ] && exit 0; d=/proc/device-tree/soc/gpu@302600000; for p in m4-max-power-mw m4-core-mask; do [ -e "$$d/apple,$$p" ] && echo "apple,$$p:$$(od -An -tu4 --endian=big "$$d/apple,$$p")"; done; [ -e "$$d/apple,firmware-build" ] && echo "apple,firmware-build: $$(tr -d "[:cntrl:]" < "$$d/apple,firmware-build")"; dmesg | grep -E "G16|asahi_m4|302600000.gpu" | tail -n 40'
 RemainAfterExit=yes
 TimeoutStartSec=25
-StandardOutput=append:/tmp/m4-gpu-start.log
-StandardError=append:/tmp/m4-gpu-start.log
