@@ -40,8 +40,25 @@ chmod 700 "$work"
 tar -xzf "$kit/installer-macos.tar.gz" -C "$work"
 cp "$kit/installer_data.json" "$work/installer_data.json"
 printf 'Installer working directory: %s\n' "$work"
-printf '%s\n' 'Preparing speaker filters from this Mac. No partition changes have started.'
 python="$work/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
+printf '%s\n' 'Checking this Mac'\''s GPU tables. No partition changes have started.'
+gpu=0
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" \
+  DYLD_LIBRARY_PATH="$work/Frameworks/Python.framework/Versions/Current/lib" \
+  DYLD_FRAMEWORK_PATH="$work/Frameworks" \
+  "$python" -I -B "$kit/m4-j713-gpu-preflight.py" || gpu=$?
+case "$gpu" in
+  0) ;;
+  4) echo 'The boot loader would stop on this Mac'\''s GPU tables. Not installing.' >&2; exit 1 ;;
+  3) printf '%s\n' 'This release'\''s GPU driver will refuse this Mac: Linux would start' \
+       'without a desktop (text console on Control+Option+F2 only).'
+     read -r -p 'Install anyway? [y/N] ' answer
+     [[ "$answer" == y || "$answer" == Y ]] || exit 0 ;;
+  *) printf '%s\n' 'The GPU check could not predict the result on this Mac.'
+     read -r -p 'Install anyway? [y/N] ' answer
+     [[ "$answer" == y || "$answer" == Y ]] || exit 0 ;;
+esac
+printf '%s\n' 'Preparing speaker filters from this Mac. No partition changes have started.'
 /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" \
   DYLD_LIBRARY_PATH="$work/Frameworks/Python.framework/Versions/Current/lib" \
   DYLD_FRAMEWORK_PATH="$work/Frameworks" \

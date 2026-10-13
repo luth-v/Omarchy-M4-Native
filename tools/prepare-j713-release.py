@@ -493,6 +493,7 @@ def assemble(args):
     for name in ('manifest.json', 'README.md'):
         shutil.copyfile(tree / 'audio/j713/owner-fir' / name, owner / 'bundle' / name)
     shutil.copyfile(tree / 'tools/m4-j713-fir-owner.py', owner / 'm4-j713-fir-owner.py')
+    shutil.copyfile(tree / 'tools/m4-j713-gpu-preflight.py', output / 'm4-j713-gpu-preflight.py')
     shutil.copyfile(args.numpy_source, output / 'source/numpy-2.5.3.tar.gz')
     shutil.copyfile(args.cargo_source, output / 'source/j713-audio-cargo-sources.tar.gz')
     shutil.copyfile(args.sound_exports, output / 'source/reference-sound-exports.symvers')
