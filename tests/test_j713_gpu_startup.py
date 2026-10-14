@@ -7,14 +7,13 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+# An override exercises the exact retained unit before the repair.
+UNIT = Path(os.environ.get('J713_GPU_SERVICE', ROOT / 'packaging/j713-startup/m4-gpu.service'))
 
 
 class GraphicsStartupTests(unittest.TestCase):
     def pre_start(self, ready):
-        # An override exercises the exact retained unit before the repair.
-        unit = Path(os.environ.get('J713_GPU_SERVICE',
-                                   ROOT / 'packaging/j713-startup/m4-gpu.service'))
-        commands = [line.split('=', 1)[1] for line in unit.read_text().splitlines()
+        commands = [line.split('=', 1)[1] for line in UNIT.read_text().splitlines()
                     if line.startswith('ExecStartPre=')]
         self.assertEqual(len(commands), 1)
         argv = shlex.split(commands[0])
@@ -41,6 +40,20 @@ esac
 
     def test_missing_scanout_still_fails(self):
         self.assertNotEqual(self.pre_start(False).returncode, 0)
+
+    def test_failure_diagnostics_reach_the_journal(self):
+        lines = UNIT.read_text().splitlines()
+        self.assertFalse([line for line in lines if line.startswith(('StandardOutput=', 'StandardError='))])
+        self.assertIn('ExecStart=/usr/bin/bash -x /usr/local/bin/m4-gpu-start', lines)
+        post = [line.split('=', 1)[1] for line in lines if line.startswith('ExecStopPost=')]
+        self.assertEqual(len(post), 1)
+        self.assertTrue(post[0].startswith('-/usr/bin/sh -c '))
+        # systemd expands $NAME itself; every shell variable must be escaped as $$.
+        self.assertNotRegex(post[0].replace('$$', ''), r'\$')
+        self.assertNotIn('\\', post[0])
+        for name in ('SERVICE_RESULT', 'm4-max-power-mw', 'm4-core-mask',
+                     'apple,firmware-build', 'dmesg'):
+            self.assertIn(name, post[0])
 
 
 if __name__ == '__main__':
