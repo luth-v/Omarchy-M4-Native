@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<dict>
+		<key>gpu-num-perf-states</key>
+		<data>
+		DwAAAA==
+		</data>
+		<key>perf-state-count</key>
+		<data>
+		EAAAAA==
+		</data>
+		<key>perf-state-table-count</key>
+		<data>
+		AQAAAA==
+		</data>
+		<key>perf-states</key>
+		<data>
+		AAAAAH0AAACAeCUUZwIAAIDu1SSPAgAAAP9xL7ICAAAAWdQx3wIAAAAoUDff
+		AgAAAF6+OBYDAAAASPE+FgMAAECBwz5SAwAAgMi8RVIDAAAAIKpEegMAAIC7
+		LEx6AwAAAJXDR5gDAACAQsBPmAMAAIAnCU/jAwAAgGueV+MDAAA=
+		</data>
+		<key>perf-states-sram</key>
+		<data>
+		AAAAAAwDAACAeCUUDAMAAIDu1SQMAwAAAP9xLwwDAAAAWdQxDAMAAAAoUDcM
+		AwAAAF6+OBYDAAAASPE+FgMAAECBwz5SAwAAgMi8RVIDAAAAIKpEegMAAIC7
+		LEx6AwAAAJXDR5gDAACAQsBPmAMAAIAnCU/jAwAAgGueV+MDAAA=
+		</data>
+	</dict>
+</array>
+</plist>

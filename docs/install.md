@@ -55,10 +55,16 @@ Linux image leaves the front port disabled. macOS may recognize both ports.
 4. Confirm that you have read these instructions. Choose whether to enable Google
    Widevine for protected movies. **No is the default.** No Widevine binary is in
    the download; consenting enables acquisition from Google after Linux starts.
-5. Speaker filters are generated from the Mac's installed components, in memory,
+5. The launcher reads this Mac's GPU performance tables (read-only) and predicts
+   whether the release's GPU driver will start. The alpha.1 driver accepts only
+   the qualified board constants: 10 GPU cores, 10 voltage steps, 1470 MHz and a
+   derived maximum of exactly 24,800 mW (a 1000 mV top state). An Air whose top
+   state is 995 mV derives 24,676 mW and would boot without a desktop; you are
+   asked before continuing. Tables that would stop the boot loader are refused.
+6. Speaker filters are generated from the Mac's installed components, in memory,
    and must match the release's exact expected hashes. If preparation fails,
    stop: no partitioning has begun. Do not bypass the checks or substitute filters.
-6. Enter your **macOS** password when requested. Terminal displays no characters
+7. Enter your **macOS** password when requested. Terminal displays no characters
    while you type it. Sleep prevention stays active during the installer.
 
 The launcher can also use an existing complete recovery download:

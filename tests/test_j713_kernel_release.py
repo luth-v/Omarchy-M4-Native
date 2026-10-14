@@ -72,6 +72,7 @@ class KernelReleaseTests(unittest.TestCase):
         self.receipt_path = self.base / 'receipt.json'
         self.save_receipt()
         for name in ('tools/m4-j713-owner-assets.py', 'tools/m4-j713-fir-owner.py',
+                     'tools/m4-j713-gpu-preflight.py',
                      'packaging/Install.command', 'docs/install.md', 'docs/release-limitations.md',
                      'docs/updates.md', 'docs/j713-poweroff.md', 'docs/release-source.md',
                      'docs/j713-afe-native-action.md', 'audio/j713/owner-fir/README.md'):
