@@ -1,0 +1,17 @@
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+.*.cmd
+*.dtbo
+modules.order
+Module.symvers
+media.symvers
+tests/.build/
+__pycache__/
+*.dat
+*.bin
+*.nv12
+*.mkv
+logs/
