@@ -48,7 +48,7 @@ def covers_protected(path, protected):
     return path.endswith('/') and any(p.startswith(path) for p in protected)
 
 
-BOOT_VERSION = '1-19'
+BOOT_VERSION = '1-20'
 SPEAKER_VERSION = '1-5'
 
 
@@ -62,6 +62,19 @@ def write_size(root, relative, size):
 
 
 class RecipeTests(unittest.TestCase):
+    def test_boot_delivers_backlight_and_camera(self):
+        dependencies = set(re.findall(r"'([^']+)'", field(recipe('omarchy-m4-boot'), 'depends')))
+        self.assertTrue({'omarchy-m4-backlight', 'omarchy-m4-camera', CHECK.SPEAKER_DEP} <= dependencies)
+        for name in ('omarchy-m4-backlight', 'omarchy-m4-camera'):
+            with self.subTest(package=name):
+                self.assertIn(name, CHANNEL['packages'])
+                self.assertIn(name, CHANNEL['allowed_paths'])
+        for unit in (CHECK.BACKLIGHT_UNIT, CHECK.CAMERA_UNIT):
+            with self.subTest(unit=unit):
+                self.assertIn(unit, CHANNEL['protected_exceptions'])
+                self.assertTrue(any(unit == path or unit.startswith(path)
+                                    for path in CHANNEL['protected_paths']))
+
     def test_a_directory_over_a_protected_path_is_caught(self):
         self.assertTrue(covers_protected('usr/lib/', CHANNEL['protected_paths']))
         self.assertFalse(covers_protected('usr/lib/gstreamer-1.0/', CHANNEL['protected_paths']))
@@ -136,6 +149,32 @@ class RecipeTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(f'refusing {other}: not the pinned input', result.stderr)
                     self.assertFalse(out.exists(), 'nothing is built from an unpinned archive')
+
+    def test_camera_recipe_pins_the_channel_modules_not_the_kernel_package_release(self):
+        text = recipe('omarchy-m4-camera')
+        self.assertEqual((field(text, 'pkgver'), field(text, 'pkgrel')), ('1', '3'))
+        for path, digest in CHANNEL['camera_modules'].items():
+            self.assertIn(f"'{digest}'", text)
+            self.assertIn(f'package-inputs/{Path(path).stem}-{digest[:8]}.ko', text)
+        # A linux-m4-omarchy rebuild for the same release must not block omarchy-m4-update;
+        # m4-camera and the loader check the running release themselves.
+        self.assertIn("depends=('python' 'kmod' 'util-linux' 'glibc' 'gcc-libs' 'zlib' 'bzip2' 'linux-m4-omarchy')\n", text)
+        self.assertEqual(load('tools/m4-camera.py').RELEASE, CHANNEL['kernel']['release'])
+        digest = CHANNEL['camera_reader'][CHECK.CAMERA_READER]
+        self.assertIn(f"'{digest}'", text)
+        self.assertIn(f'package-inputs/m4-apfs-reader-{digest[:8]}', text)
+        self.assertNotIn('build() {', text)
+        self.assertNotIn('prepare() {', text)
+        self.assertNotIn('makedepends=', text)
+        self.assertNotIn('codeload.github.com', text)
+
+    def test_camera_tuning_pins_agree(self):
+        tool, owner, setup = load('tools/m4-camera.py'), load('tools/m4-camera-owner.py'), load('tools/m4-channel-setup.py')
+        self.assertEqual({tool.TUNING, owner.DESTINATION, setup.CAMERA_TUNING}, {'usr/lib/firmware/apple/isp_2224_01XX.dat'})
+        self.assertEqual({tool.TUNING_SHA256, owner.SHA256, setup.CAMERA_TUNING_SHA256}, {owner.SHA256})
+        self.assertEqual([entry['sha256'] for entry in owner.QUALIFIED], [owner.SHA256])
+        self.assertEqual(setup.CAMERA_TUNING_SIZE, owner.SIZE)
+        self.assertEqual((setup.CAMERA_STAGED, setup.CAMERA_STATE), (tool.INSTALLED + '/j713_isp_cam.ko', tool.STATE))
 
     def test_gpu_recipe_pins_the_channel_module(self):
         text = recipe('omarchy-m4-gpu')
@@ -299,6 +338,89 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'must require the USB display package'):
             CHECK.check_package(CHANNEL, *self.boot_package(files, {**self.boot_info(), 'depend': without_evdi}))
 
+    def test_boot_package_must_bring_the_camera(self):
+        without = [d for d in self.boot_info()['depend'] if d != 'omarchy-m4-camera']
+        with self.assertRaisesRegex(ValueError, 'must require the camera package'):
+            files = {**self.boot_files(), CHECK.REALTIME: (0o644, file_sha('packaging/omarchy-m4/omarchy-m4-boot/speakersafetyd-j713-realtime.conf'))}
+            CHECK.check_package(CHANNEL, *self.boot_package(files, {**self.boot_info(), 'depend': without}))
+
+    def camera_files(self):
+        sources = {
+            'usr/bin/m4-camera': ('tools/m4-camera.py', 0o755),
+            'usr/lib/omarchy-m4/j713-camera/m4-camera-owner.py': ('tools/m4-camera-owner.py', 0o644),
+            'usr/lib/omarchy-m4/j713-camera/health-on-air.py': ('video/j713/camera/health-on-air.py', 0o644),
+            'usr/lib/omarchy-m4/j713-camera/SHA256SUMS': ('packaging/omarchy-m4/omarchy-m4-camera/SHA256SUMS', 0o644),
+            CHECK.CAMERA_UNIT: ('packaging/omarchy-m4/omarchy-m4-camera/m4-j713-camera.service', 0o644),
+            'usr/lib/modprobe.d/omarchy-m4-camera.conf': ('packaging/omarchy-m4/omarchy-m4-camera/omarchy-m4-camera.conf', 0o644),
+        }
+        files = {path: (mode, file_sha(source)) for path, (source, mode) in sources.items()}
+        files.update({path: (0o644, digest) for path, digest in CHANNEL['camera_modules'].items()})
+        package, info, files, root = self.package('omarchy-m4-camera', files)
+        for path, (source, _) in sources.items():
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / source).read_bytes())
+        info['depend'] = ['python', 'kmod', 'util-linux', 'glibc', 'gcc-libs', 'zlib', 'bzip2', 'linux-m4-omarchy']
+        reader = bytearray(64)
+        reader[:7] = b'\x7fELF\x02\x01\x01'
+        reader[18:20] = (183).to_bytes(2, 'little')
+        target = root / CHECK.CAMERA_READER
+        target.write_bytes(reader)
+        files[CHECK.CAMERA_READER] = (0o755, hashlib.sha256(reader).hexdigest())
+        pinned = patch.dict(CHANNEL['camera_reader'], {CHECK.CAMERA_READER: hashlib.sha256(reader).hexdigest()})
+        pinned.start()
+        self.addCleanup(pinned.stop)
+        for notice in ('apfs-fuse-GPL-2.0-or-later.txt', 'lzfse-BSD-3-Clause.txt', 'reader-SOURCE-NOTICES.md'):
+            files['usr/share/licenses/omarchy-m4-camera/' + notice] = (0o644, '1' * 64)
+        info['.INSTALL'] = [file_sha('packaging/omarchy-m4/omarchy-m4-camera/omarchy-m4-camera.install')]
+        return package, info, files, root
+
+    def test_camera_pins_tools_unit_hook_and_kernel_dependency(self):
+        package, info, files, root = self.camera_files()
+        CHECK.check_package(CHANNEL, package, info, files, root)
+        for path in files:
+            if path.startswith('usr/share/licenses/'):
+                continue
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'camera|Camera'):
+                wrong = {**files, path: (files[path][0], '0' * 64)}
+                CHECK.check_package(CHANNEL, package, info, wrong, root)
+        for key, value in (('.INSTALL', ['0' * 64]), ('depend', ['python', 'kmod']),
+                           ('depend', [*info['depend'][:-1], 'linux-m4-omarchy=7.1.9.m4.20261008-2'])):
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'camera|Camera'):
+                CHECK.check_package(CHANNEL, package, {**info, key: value}, files, root)
+
+    def test_camera_reader_missing_wrong_arch_and_missing_licenses_refuse(self):
+        package, info, files, root = self.camera_files()
+        for path in (CHECK.CAMERA_READER,
+                     'usr/share/licenses/omarchy-m4-camera/apfs-fuse-GPL-2.0-or-later.txt',
+                     'usr/share/licenses/omarchy-m4-camera/lzfse-BSD-3-Clause.txt'):
+            wrong = {key: value for key, value in files.items() if key != path}
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'Camera'):
+                CHECK.check_package(CHANNEL, package, info, wrong, root)
+        target = root / CHECK.CAMERA_READER
+        data = bytearray(target.read_bytes())
+        data[18:20] = (62).to_bytes(2, 'little')
+        target.write_bytes(data)
+        wrong = {**files, CHECK.CAMERA_READER: (0o755, hashlib.sha256(data).hexdigest())}
+        with self.assertRaisesRegex(ValueError, 'AArch64 ELF'):
+            CHECK.check_package(CHANNEL, package, info, wrong, root)
+
+    def test_camera_reader_test_image_support_and_unpinned_binary_refuse(self):
+        package, info, files, root = self.camera_files()
+        target = root / CHECK.CAMERA_READER
+        for suffix, reason in ((b'--image', 'test-image'), (b'unpinned-build', 'differs from the pin')):
+            data = target.read_bytes()[:64] + suffix
+            target.write_bytes(data)
+            wrong = {**files, CHECK.CAMERA_READER: (0o755, hashlib.sha256(data).hexdigest())}
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(ValueError, reason):
+                CHECK.check_package(CHANNEL, package, info, wrong, root)
+
+    def test_camera_never_installs_apple_data(self):
+        package, info, files, root = self.camera_files()
+        with self.assertRaisesRegex(ValueError, 'unlisted path|protected path'):
+            CHECK.check_package(CHANNEL, package, info,
+                                {**files, 'usr/lib/firmware/apple/isp_2224_01XX.dat': (0o644, '0' * 64)}, root)
+
     def evdi_info(self):
         return {'pkgname': ['omarchy-m4-evdi'], 'pkgver': ['1.15.1-1'], 'arch': ['aarch64'],
                 'provides': ['evdi=1.15.1'], 'conflict': ['evdi', 'evdi-dkms', 'evdi-git'],
@@ -448,7 +570,7 @@ class PolicyTests(unittest.TestCase):
     def boot_info(self):
         return {'pkgname': ['omarchy-m4-boot'], 'pkgver': [BOOT_VERSION], 'arch': ['aarch64'],
                 'depend': ['python', 'pacman', 'omarchy-m4-gpu', 'omarchy-m4-headphones', 'omarchy-m4-cpu',
-                           'omarchy-m4-evdi', 'omarchy-m4-backlight', 'omarchy-m4-speaker>=1-5']}
+                           'omarchy-m4-evdi', 'omarchy-m4-backlight', 'omarchy-m4-speaker>=1-5', 'omarchy-m4-camera']}
 
     def boot_files(self):
         """A boot package that passes every check except the ones under test, unpacked on disk."""

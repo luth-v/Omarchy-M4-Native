@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+/*
+ * The loader powers the ISP before applying this
+ * overlay and keeps it powered until power-off. No PMGR provider is added.
+ * The loader replaces the four interrupt-parent cells with the live AIC
+ * phandle. Local DART references are resolved by the overlay resolver.
+ */
+/ {
+	fragment@0 {
+		target-path = "/soc";
+		__overlay__ {
+			#address-cells = <2>;
+			#size-cells = <2>;
+
+			d_dart0: iommu@48e8c0000 {
+				compatible = "apple,t8110-dart";
+				reg = <0x4 0x8e8c0000 0 0x4000>;
+				#iommu-cells = <1>;
+				interrupt-parent = <0xfeed00c1>;
+				interrupts = <0 387 4>;
+				apple,dma-range = <0x100 0 0x1 0>;
+			};
+
+			d_dart1: iommu@48e8e0000 {
+				compatible = "apple,t8110-dart";
+				reg = <0x4 0x8e8e0000 0 0x4000>;
+				#iommu-cells = <1>;
+				interrupt-parent = <0xfeed00c1>;
+				interrupts = <0 387 4>;
+				apple,dma-range = <0x100 0 0x1 0>;
+			};
+
+			d_dart2: iommu@48e900000 {
+				compatible = "apple,t8110-dart";
+				reg = <0x4 0x8e900000 0 0x4000>;
+				#iommu-cells = <1>;
+				interrupt-parent = <0xfeed00c1>;
+				interrupts = <0 387 4>;
+				apple,dma-range = <0x100 0 0x1 0>;
+			};
+
+			d_mbox: mailbox@48d608000 {
+				compatible = "apple,t8103-asc-mailbox", "apple,asc-mailbox-v4";
+				reg = <0x4 0x8d608000 0 0x4000>;
+				#mbox-cells = <0>;
+				interrupt-parent = <0xfeed00c1>;
+				/* RX verified at 18:24; TX 354 storms while full, so use 353. */
+				interrupts = <0 353 4>, <0 354 4>, <0 355 4>, <0 356 4>;
+				interrupt-names = "send-empty", "send-not-empty",
+						  "recv-empty", "recv-not-empty";
+			};
+
+			isp-stage-d@48d600000 {
+				compatible = "omarchy,j713-isp-stage-d";
+				iommus = <&d_dart0 0>, <&d_dart1 0>, <&d_dart2 0>;
+				mboxes = <&d_mbox>;
+				mbox-names = "rtkit";
+				/* debug: M1-M3 apple-isp EDPRCR window, same offset as RVBAR's cluster. */
+				reg-names = "cpu", "rvbar", "debug";
+				reg = <0x4 0x8d600000 0 0x100>,
+				      <0x4 0x8d050000 0 0x40>,
+				      <0x4 0x8d010000 0 0x1000>;
+			};
+		};
+	};
+};

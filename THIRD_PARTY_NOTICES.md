@@ -177,6 +177,31 @@ configuration and devicetree base published with v0.1.0-alpha.1 (see
 and `patches/j713-smc-poweroff.dtso` in this repository. Each package carries
 its license texts. See [package-channel.md](docs/package-channel.md).
 
+### J713 camera
+
+`omarchy-m4-camera` builds the GPL-2.0-only driver and device-tree loader from
+[`video/j713/camera/kernel/`](video/j713/camera/kernel/). The port derives from
+the owner's reviewed J713 driver, module SHA256
+`82f9fd253d731857c162ef6fc61bd8907e638687bf45da6379270dbc19e95a33`, and its
+Stage D power, mapping and overlay sources. Their SPDX headers are retained.
+The boot tool and owner-data extractor are MIT-licensed contributions by
+Luthfi Hizb. Both license texts accompany the package.
+
+The separate [APFS reader](video/j713/camera/apfs-reader/SOURCE-NOTICES.md)
+builds ApfsLib from apfs-fuse `66b86bd525e8cb90f9012543be89b1f092b75cf3`,
+GPL-2.0-or-later, and lzfse `e634ca58b4821d9f3d560cdc6df5dec02ffc93fd`,
+BSD-3-Clause. Checksummed upstream archives mirrored in `package-inputs`, the build files
+and the read-only patch supply its corresponding source. The helper is built
+out of band, pinned and joined to those sources; both upstream license texts accompany the package.
+No FUSE executable is built. The MIT extractor invokes the GPL helper as a
+separate process. Third-party disk fixtures are not committed or packaged.
+
+Apple's ISP firmware, camera daemon and tuning data are not redistributed.
+The installer/update extractor reads the owner's macOS installation and
+installs only a locally qualified tuning record. Source constants, file
+names and identity hashes do not grant rights in those Apple components.
+The replay fixtures use synthetic data and contain no firmware or images.
+
 ### DisplayLink evdi
 
 `omarchy-m4-evdi` redistributes binaries built from DisplayLink's

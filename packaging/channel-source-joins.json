@@ -414,6 +414,82 @@
         }
       ],
       "evidence": "snd-soc-apple-mca.ko is fb941df4d55c4f2093b4595e0392aaf97ffe3a250228518b18a4f70568bf7454, 79152 bytes. It is built from audio/j713/kernel/mca.c by the same verified-input recipe as Image.gz, with the listed source manifests, historical and retained patches, and public qualified-module-certificate.pem. Four fresh builds reproduced the same Image.gz and five audio modules: A and B used the pinned-certificate builder at 8ee57bea0d4f26d92a47f730743ec8d5563de56d; C used 91dabdf39993fb7f01ea2a4db55a2c686e6e0ba5 with verified source closure and the destination case probe; D used dc191cb3e7dc935cb5f4e13a5b44f2a835a6a331 with directory-alias compatibility. These are four builds across three recipe revisions, not four builds of the final recipe. Their saved receipts are byte-identical (SHA-256 541ba2f4fe20ff3623adc489524dea19cc500634d8d01527c3585384e234f7c8). Build D reproduced the final recipe outputs directly. The builder image is sha256:b2069edb8a23761d9211559fe632f5464aebc4cdfa9558d0f4c93211890fd7b1, with clang 21.1.8, KBUILD_BUILD_TIMESTAMP 2026-10-20, KBUILD_BUILD_VERSION 19 and conservative-v1 audio profile. Configuration 14b4437b2b195e912a2ab614d28761acd3dc79f886d4487964aa0912616a3a6e and exports 5e3c2624c6a991bae503336137ce15071e51ef043edcd20ba1ad19df4e23d67c were unchanged; supplemental exports remain 9f3e2cf8c83045e3a89b94ef7c8526c4dfb10b386d872669819cd8f4f35d4362. Recipe paths pinned to 24920ee126207d8a5595f1297892384cef77776a have the same Git content as build D. The historical build receipts retain native_qualified=false and fresh_install_qualified=false; subsequent native migration evidence is documented separately in docs/retained-audio-transport-audit.md and its companion rollout proof. This entry establishes source correspondence, not channel promotion or fresh-install qualification."
+    },
+    "j713_isp_cam-ddcdf324.ko": {
+      "sha256": "ddcdf32476245d0cb8d803bedcc48d721b7fc1a3677e86ccea86abc3177d01a8",
+      "license": "GPL-2.0-only",
+      "correspondence": "rebuilt-identical",
+      "sources": [
+        {
+          "tree": "video/j713/camera/kernel",
+          "commit": "cb4d4179ff48e71484aeee2b46f56215af8b7b07"
+        },
+        {
+          "tree": "tools/build-j713-camera.sh",
+          "commit": "cb4d4179ff48e71484aeee2b46f56215af8b7b07"
+        },
+        {
+          "tree": "video/j713/camera/kernel-inputs.sha256",
+          "commit": "cb4d4179ff48e71484aeee2b46f56215af8b7b07"
+        },
+        {
+          "archive": "source/kernel-controller.tar.gz",
+          "sha256": "810339d85aa3171fb1a982b71d01c0bf4de816f81ebbe9149d0dd3268e98ce57"
+        },
+        {
+          "archive": "source/reference-media-exports.symvers",
+          "sha256": "ae0764effc35075fedb4e3492d973a655e963e612cba1e28a1609b6d4f876285"
+        }
+      ],
+      "evidence": "Two offline clean builds with tools/build-j713-camera.sh, including one from the joined commit, immutable j713-jack-builder:clang21 image 1fded33e, Clang 21.1.8, W=1 KCFLAGS=-Werror. Read-only pinned kernel inputs and media-only exports ae0764ef; both AArch64 modules reproduce byte for byte with vermagic 7.1.9-m4-gpu-backport-20261008. 720p replay matches the prior port and 82f9fd25 source; 1080p replay matches the out-of-tree 85fe34f2 source tested on hardware on 2026-10-19. On 2026-10-21 the contributor's MacBook Air M4 boot service loaded these exact modules from package 1-1. Both 720p and 1080p captures delivered 150/150 frames with zero drops; 1080p accepted firmware output 1920x1888, and 720p worked normally afterwards. After a later power cycle with final package 1-3, the service loaded the same modules for three 720p Meet sessions. These runs used the original 20261008 kernel build and the contributor's own boot chain, not the retained-bounds rebuilt image, channel devicetree or new display handoff stage 2. Camera loading on that rebuilt image remains untested on hardware."
+    },
+    "j713_isp_d_dt-c6d115ec.ko": {
+      "sha256": "c6d115ec5ab1f465a2f6c088ec431bb19e5cf437b6247f1cd95032b1b17c634a",
+      "license": "GPL-2.0-only",
+      "correspondence": "rebuilt-identical",
+      "sources": [
+        {
+          "tree": "video/j713/camera/kernel",
+          "commit": "cb4d4179ff48e71484aeee2b46f56215af8b7b07"
+        },
+        {
+          "tree": "tools/build-j713-camera.sh",
+          "commit": "cb4d4179ff48e71484aeee2b46f56215af8b7b07"
+        },
+        {
+          "tree": "video/j713/camera/kernel-inputs.sha256",
+          "commit": "cb4d4179ff48e71484aeee2b46f56215af8b7b07"
+        },
+        {
+          "archive": "source/kernel-controller.tar.gz",
+          "sha256": "810339d85aa3171fb1a982b71d01c0bf4de816f81ebbe9149d0dd3268e98ce57"
+        },
+        {
+          "archive": "source/reference-media-exports.symvers",
+          "sha256": "ae0764effc35075fedb4e3492d973a655e963e612cba1e28a1609b6d4f876285"
+        }
+      ],
+      "evidence": "Two offline clean builds with tools/build-j713-camera.sh, including one from the joined commit, immutable j713-jack-builder:clang21 image 1fded33e, Clang 21.1.8, W=1 KCFLAGS=-Werror. Read-only pinned kernel inputs and media-only exports ae0764ef; both AArch64 modules reproduce byte for byte with vermagic 7.1.9-m4-gpu-backport-20261008. 720p replay matches the prior port and 82f9fd25 source; 1080p replay matches the out-of-tree 85fe34f2 source tested on hardware on 2026-10-19. On 2026-10-21 the contributor's MacBook Air M4 boot service loaded these exact modules from package 1-1. Both 720p and 1080p captures delivered 150/150 frames with zero drops; 1080p accepted firmware output 1920x1888, and 720p worked normally afterwards. After a later power cycle with final package 1-3, the service loaded the same modules for three 720p Meet sessions. These runs used the original 20261008 kernel build and the contributor's own boot chain, not the retained-bounds rebuilt image, channel devicetree or new display handoff stage 2. Camera loading on that rebuilt image remains untested on hardware."
+    },
+    "m4-apfs-reader-cc9e96b8": {
+      "sha256": "cc9e96b8854005154e0f49d6aaa630dd9276d4d99ab9b23777b385dd9551e225",
+      "license": "GPL-2.0-or-later AND BSD-3-Clause",
+      "correspondence": "rebuilt-identical",
+      "sources": [
+        {
+          "tree": "video/j713/camera/apfs-reader",
+          "commit": "6cb8e2a3eda6fb894ee6db148af70e8d0f73dff0"
+        },
+        {
+          "archive": "package-inputs/apfs-fuse-66b86bd525e8cb90f9012543be89b1f092b75cf3.tar.gz",
+          "sha256": "e78e71e87d8ba182822ec34233189141b8816c9a3f700c9a22f6dc1480afee51"
+        },
+        {
+          "archive": "package-inputs/lzfse-e634ca58b4821d9f3d560cdc6df5dec02ffc93fd.tar.gz",
+          "sha256": "ca98aa6644d44500e3315858daa747ce15bd06d49e3edb12a5458e5525e8ebdb"
+        }
+      ],
+      "evidence": "Built out of band on x86_64 with build.sh, Clang/LLVM 23.1.3-4, CMake 4.4.4-1, GNU make 4.4.1-3, pinned LLD 23.1.3-4 and ALARM GCC 16.1.1 sysroot packages. Exact versions, filenames and hashes are in host-inputs.json and cross-inputs.json, with archival x86_64 URLs. Three prior clean builds and one round-three build reproduced identical AArch64 PIE bytes with cross-toolchain.cmake. Fixture mode and sanitizers disabled; unused sections removed. On a MacBook Air M4 with macOS 26.6.2 / 25G83, package 1-2 (3d22d60bb9d86b39e0faa0455bd950a2f7296da2aa4880854aab4c8d2266f3d5) recovered the removed qualified record before reboot and installed this exact helper (cc9e96b8854005154e0f49d6aaa630dd9276d4d99ab9b23777b385dd9551e225). Inspection as nobody with no capabilities and no_new_privs completed without refusal reasons on internal APFS partitions p1, p2, p3 and p7. No packaged boot-service result is included in that evidence."
     }
   }
 }

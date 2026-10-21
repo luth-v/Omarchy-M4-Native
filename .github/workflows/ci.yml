@@ -51,7 +51,13 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lua5.4 device-tree-compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lua5.4 device-tree-compiler cmake g++ zlib1g-dev libbz2-dev
+      - name: Fetch pinned APFS reader sources
+        run: |
+          mkdir -p "$RUNNER_TEMP/apfs-sources"
+          curl -qfL --proto '=https' --proto-redir '=https' --retry 3 'https://github.com/Kb2uka/Omarchy-M4-Native/releases/download/package-inputs/apfs-fuse-66b86bd525e8cb90f9012543be89b1f092b75cf3.tar.gz' -o "$RUNNER_TEMP/apfs-sources/apfs-fuse-66b86bd525e8cb90f9012543be89b1f092b75cf3.tar.gz"
+          curl -qfL --proto '=https' --proto-redir '=https' --retry 3 'https://github.com/Kb2uka/Omarchy-M4-Native/releases/download/package-inputs/lzfse-e634ca58b4821d9f3d560cdc6df5dec02ffc93fd.tar.gz' -o "$RUNNER_TEMP/apfs-sources/lzfse-e634ca58b4821d9f3d560cdc6df5dec02ffc93fd.tar.gz"
+          echo "M4_APFS_SOURCES=$RUNNER_TEMP/apfs-sources" >> "$GITHUB_ENV"
       - name: Fetch pinned Asahi devicetree sources
         run: |
           bash tools/ci/fetch-asahi-dts.sh "$RUNNER_TEMP/asahi-linux"

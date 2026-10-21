@@ -6,6 +6,8 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -27,6 +29,40 @@ def joined(data, correspondence='unverified', sources=None):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_published_integration_archive_contains_camera_corresponding_source(self):
+        spec = importlib.util.spec_from_file_location('publish_camera_sources', ROOT / 'tools/publish-m4-packages.py')
+        publisher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(publisher)
+        revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        joins = CHECK.source_joins()['binaries']
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / publisher.SOURCE_ARCHIVE.format(revision=revision)
+            publisher.build_source_archive(target, revision)
+            with tarfile.open(target, 'r:gz') as archive:
+                self.assertEqual(archive.extractfile(publisher.SOURCE_REVISION).read().decode(), revision + '\n')
+                for name in CHECK.package_inputs('omarchy-m4-camera'):
+                    entry = joins[name]
+                    for source in entry['sources']:
+                        if 'tree' not in source:
+                            continue
+                        files = subprocess.check_output(
+                            ['git', '-C', str(ROOT), 'ls-tree', '-r', '--name-only', source['commit'],
+                             '--', source['tree']], text=True).splitlines()
+                        self.assertTrue(files, source)
+                        for path in files:
+                            with self.subTest(binary=name, path=path):
+                                expected = subprocess.check_output(
+                                    ['git', '-C', str(ROOT), 'show', source['commit'] + ':' + path])
+                                self.assertEqual(archive.extractfile(path).read(), expected)
+                # The supplemental media table is a separate pinned source input.
+                # Publishing integration sources must not silently replace that pin.
+                for name in ('j713_isp_cam-ddcdf324.ko', 'j713_isp_d_dt-c6d115ec.ko'):
+                    self.assertIn({'archive': 'source/reference-media-exports.symvers',
+                                   'sha256': 'ae0764effc35075fedb4e3492d973a655e963e612cba1e28a1609b6d4f876285'},
+                                  joins[name]['sources'])
+                    self.assertIn({'tree': 'video/j713/camera/kernel-inputs.sha256',
+                                   'commit': joins[name]['sources'][0]['commit']}, joins[name]['sources'])
+
     def load(self, joins):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'joins.json'
@@ -61,7 +97,7 @@ class ManifestTests(unittest.TestCase):
     def test_repository_channel_joins_pass_schema_and_match_pins(self):
         joins = CHECK.source_joins()
         binaries = joins['binaries']
-        self.assertEqual(len(binaries), 17)
+        self.assertEqual(len(binaries), 20)
         for name, entry in binaries.items():
             with self.subTest(name=name):
                 self.assertIn(entry['correspondence'], CHECK.CORRESPONDENCE)

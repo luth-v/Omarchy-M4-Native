@@ -64,6 +64,12 @@ GPU_MODULE = 'opt/m4-gpu/asahi_m4.ko'
 GPU_HOLD = 'var/lib/omarchy-m4/gpu-module/hold'
 GPU_STOCK = '80cf3669575edd09aed226a93e47aaaf132e70f1070154629c413c0b40d34578'
 HEADPHONES_STAGED = 'usr/lib/omarchy-m4/j713-headphones/snd-soc-j713-headphones.ko'
+CAMERA_STAGED = 'usr/lib/omarchy-m4/j713-camera/j713_isp_cam.ko'
+CAMERA_STATE = 'var/lib/omarchy-m4/camera'
+# The qualified owner tuning that m4-camera requires before it loads anything.
+CAMERA_TUNING = 'usr/lib/firmware/apple/isp_2224_01XX.dat'
+CAMERA_TUNING_SIZE = 0x6ff4
+CAMERA_TUNING_SHA256 = '1e25d89b7acc3b62fcb64c5102503ba289c3cb000ca6abe812c3249ac6349f77'
 HEADPHONES_STATE = 'var/lib/omarchy-m4/headphones'
 CPU_IDLE_STAGED = 'usr/lib/omarchy-m4/cpu/j713_cpuidle.ko'
 CPU_GUARD_STAGED = 'usr/lib/omarchy-m4/cpu/j713_pguard.ko'
@@ -71,7 +77,7 @@ CPU_IDLE_STATE = 'var/lib/omarchy-m4/cpu-idle'
 BACKLIGHT_STAGED = 'usr/lib/omarchy-m4/backlight/j713_dcp_backlight.ko'
 BACKLIGHT_STATE = 'var/lib/omarchy-m4/backlight'
 PACKAGES = ('omarchy-m4-keyring', 'omarchy-m4-boot', 'linux-m4-omarchy', 'omarchy-m4-gst-audio', 'omarchy-m4-speaker',
-            'omarchy-m4-gpu', 'omarchy-m4-headphones', 'omarchy-m4-cpu', 'omarchy-m4-evdi', 'omarchy-m4-backlight')
+            'omarchy-m4-gpu', 'omarchy-m4-headphones', 'omarchy-m4-cpu', 'omarchy-m4-evdi', 'omarchy-m4-backlight', 'omarchy-m4-camera')
 SINKS = 'omarchy-m4-gst-audio'  # gst-plugins-good already has both sinks and conflicts with it
 BOARD = b'apple,j713'
 CONF = 'etc/pacman.conf'
@@ -494,6 +500,25 @@ def headphones_pending(root):
             not (state / 'hold').exists() and not (state / 'attempt').exists())
 
 
+def camera_tuning_ready(root):
+    tuning = root / CAMERA_TUNING
+    return (tuning.is_file() and not tuning.is_symlink() and tuning.stat().st_size == CAMERA_TUNING_SIZE and
+            hashlib.sha256(tuning.read_bytes()).hexdigest() == CAMERA_TUNING_SHA256)
+
+
+def camera_pending(root):
+    """Whether the next boot will load the camera that omarchy-m4-camera staged.
+
+    Without qualified owner tuning m4-camera refuses at every boot, so a restart
+    would change nothing; the update reports the missing tuning instead.
+    """
+    state = root / CAMERA_STATE
+    return ((root / CAMERA_STAGED).is_file() and (root / 'sys/module').is_dir() and
+            not (root / 'sys/module/j713_isp_cam').exists() and
+            not (state / 'hold').exists() and not (state / 'attempt').exists() and
+            camera_tuning_ready(root))
+
+
 def cpu_idle_pending(root):
     """Whether omarchy-m4-cpu staged an idle driver or boost guard that the next boot will load.
 
@@ -608,10 +633,17 @@ def connect(root, apply, server, key, fingerprint, output):
             'The packages are installed, but the boot update needs attention: boot.bin is not in step with them '
             f'({boot}). See the detailed message above, then inspect m4-boot-compose and resume '
             'the pending operation it reports after fixing the cause, then rerun omarchy-m4-update')
+    # Repeat owner-data preparation on updates even when --needed installs nothing.
+    # Sandbox checks never read host partitions or run install hooks.
+    helper = root / 'usr/lib/omarchy-m4/j713-camera/m4-camera-owner.py'
+    if root == Path('/') and helper.is_file():
+        result = machine.run(['/usr/bin/python3', str(helper), '--install'])
+        if result:
+            print('Camera owner tuning unavailable; camera stays unloaded. See m4-camera.', file=output)
     machine.start_notifier()
     restart = (boot_digest(root) != before or speaker_pending(root) or mca_pending(root) or
                gpu_pending(root) or headphones_pending(root) or cpu_idle_pending(root) or
-               backlight_pending(root))
+               backlight_pending(root) or camera_pending(root))
     if boot == HELD_BOOT and restart:
         text = 'connected; restart once to apply the other update; boot updates remain held'
     elif boot == HELD_BOOT:

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+# Installed by omarchy-m4-camera. Loads the J713 camera once per boot; the
+# firmware starts at the first STREAMON. Nothing waits for it: WirePlumber
+# picks up the V4L2 node by hotplug. sudo m4-camera --disable skips it.
+[Unit]
+Description=J713 camera (FaceTime HD Camera) load at boot
+After=systemd-udev-trigger.service m4-j713-audio-register.service
+ConditionPathExists=!/var/lib/omarchy-m4/camera/hold
+
+[Service]
+Type=exec
+RemainAfterExit=yes
+ExecStart=/usr/bin/m4-camera --boot
+TimeoutStartSec=120
+RuntimeMaxSec=120
+TimeoutStopSec=5
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

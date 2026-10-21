@@ -3,7 +3,7 @@
 """Package policy for the retained-bounds boot kernel and the fixed MCA module.
 
 The base linux-m4-omarchy package keeps the qualified image and its modules.
-omarchy-m4-boot 1-19 carries the new image beside that package, and
+omarchy-m4-boot carries the new image beside that package from 1-19, and
 omarchy-m4-speaker carries the fixed MCA module. Pins come from the shipped channel.
 """
 import configparser
@@ -21,7 +21,7 @@ MCA_DROP_IN = 'usr/lib/systemd/system/m4-j713-audio-register.service.d/25-m4-mca
 MCA_DROP_IN_SOURCE = ROOT / 'packaging/omarchy-m4/omarchy-m4-speaker/25-m4-mca-module.conf'
 # The leading '-' is systemd's ignore-failure prefix and is part of the command.
 MCA_BOOT_COMMAND = '-/usr/bin/m4-speaker-module --component mca --boot'
-BOOT_VERSION = '1-19'
+BOOT_VERSION = '1-20'
 SPEAKER_VERSION = '1-5'
 
 
@@ -117,7 +117,7 @@ class HardeningPackageTests(unittest.TestCase):
     def boot_info(self, depend=None):
         if depend is None:
             depend = ['python', 'pacman', 'omarchy-m4-gpu', 'omarchy-m4-headphones', 'omarchy-m4-cpu',
-                      'omarchy-m4-evdi', 'omarchy-m4-backlight', 'omarchy-m4-speaker>=1-5']
+                      'omarchy-m4-evdi', 'omarchy-m4-backlight', 'omarchy-m4-speaker>=1-5', 'omarchy-m4-camera']
         return {'pkgname': ['omarchy-m4-boot'], 'pkgver': [BOOT_VERSION], 'arch': ['aarch64'], 'depend': depend}
 
     def boot_tree(self, pin):

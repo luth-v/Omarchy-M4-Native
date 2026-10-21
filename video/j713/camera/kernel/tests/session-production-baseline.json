@@ -1,0 +1,5 @@
+{
+  "trace_bytes": 67697262,
+  "trace_sha256": "f8fded6d36d8daf3aa091f11c5051d44f737f487b287a2b4091251f6aeda3981",
+  "description": "8 production sessions verified against 218ffcd2: colour 0/1, framing=2 fps=1, both geometries, first/later firmware sessions; complete requests, pool, IPC and logs. Synthetic data only."
+}

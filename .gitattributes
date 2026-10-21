@@ -18,3 +18,9 @@ audio/j713/speakersafetyd/vendor/alsa/README.md whitespace=-blank-at-eol,-blank-
 patches-m1n1/j773s/0002-dapf-gate-DAPF-init-per-SoC-on-the-M4-generation.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 patches-m1n1/j773s/0003-kboot-guard-stage-2-log-buffer-at-top-of-RAM.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 patches-m1n1/j773s/0004-cpu-M4-park-secondaries-in-WFE-WFI-loses-architectur.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+
+# ApfsLib patch context retains the pinned upstream indentation.
+video/j713/camera/apfs-reader/apfslib-readonly.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+
+# Preserve the exact pinned upstream lzfse license text.
+video/j713/camera/apfs-reader/lzfse-BSD-3-Clause.txt whitespace=-blank-at-eol,-blank-at-eof
