@@ -5,6 +5,7 @@
 Everything runs against a fake --root. Commands, ownership, character devices and
 waits are injected; nothing loads a module or touches the real system.
 """
+import configparser
 import contextlib
 import fcntl
 import hashlib
@@ -746,6 +747,23 @@ class CameraBoot(unittest.TestCase):
         for data in (b'', b'\x7fELF\x01\x01', module('x')[:200], elf(b'vermagic=a\0vermagic=b\0')):
             self.assertIsNone(MODULE.module_release(data))
 
+    def test_the_unit_runs_once_after_udev_and_the_speakers_and_never_blocks_login(self):
+        parser = configparser.ConfigParser(interpolation=None, strict=True)
+        parser.optionxform = str
+        parser.read_string((DRIVER / 'packaging/omarchy-m4/omarchy-m4-camera/m4-j713-camera.service').read_text())
+        self.assertEqual(parser.sections(), ['Unit', 'Service', 'Install'])
+        unit, service = dict(parser['Unit']), dict(parser['Service'])
+        self.assertEqual(unit['After'].split(), ['systemd-udev-trigger.service', 'm4-j713-audio-register.service'])
+        self.assertEqual(unit['ConditionPathExists'], '!/' + MODULE.STATE + '/hold')
+        self.assertEqual(set(unit), {'Description', 'After', 'ConditionPathExists'},
+                         'no Requires, Wants or Before: nothing waits for the camera')
+        self.assertEqual(service, {'Type': 'exec', 'RemainAfterExit': 'yes',
+                                   'ExecStart': '/usr/bin/m4-camera --boot',
+                                   'TimeoutStartSec': '120', 'RuntimeMaxSec': '120',
+                                   'TimeoutStopSec': '5', 'Restart': 'no'})
+        self.assertEqual(dict(parser['Install']), {'WantedBy': 'multi-user.target'})
+        self.assertEqual(MODULE.WANTS, 'etc/systemd/system/multi-user.target.wants/m4-j713-camera.service')
+
     def test_unavailable_tuning_never_loads_or_writes_a_strike(self):
         with mock.patch.object(MODULE, 'tuning_status', return_value='missing'):
             self.refused('boot', 'Owner tuning is unavailable')
@@ -790,6 +808,10 @@ class CameraBoot(unittest.TestCase):
         self.refused('boot', 'does not match SHA256SUMS')
         self.assert_nothing_done()
 
+    def test_package_installs_where_the_tool_looks(self):
+        recipe = (DRIVER / 'packaging/omarchy-m4/omarchy-m4-camera/PKGBUILD').read_text()
+        self.assertIn('/' + MODULE.INSTALLED, recipe)
+        self.assertIn('/usr/bin/m4-camera', recipe)
 
 
 

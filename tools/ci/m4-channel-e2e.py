@@ -44,12 +44,12 @@ CHANNEL = json.loads((ROOT / 'packaging/omarchy-m4/channel.json').read_text())
 RELEASE = CHANNEL['kernel']['release']
 # Packages an Air's 1-5 setup script does not list; omarchy-m4-boot's dependencies bring them.
 BROUGHT_BY_BOOT = ('omarchy-m4-gpu', 'omarchy-m4-headphones', 'omarchy-m4-cpu', 'omarchy-m4-evdi',
-                   'omarchy-m4-backlight')
+                   'omarchy-m4-backlight', 'omarchy-m4-camera')
 STUB = '''pkgname=e2e-system
 pkgver=1
 pkgrel=1
 arch=(any)
-provides=(python coreutils kmod pacman brightnessctl gstreamer=1.28.7 gst-plugins-base-libs=1.28.7 libpulse)
+provides=(python coreutils kmod pacman brightnessctl util-linux glibc gcc-libs zlib bzip2 gstreamer=1.28.7 gst-plugins-base-libs=1.28.7 libpulse)
 package() { mkdir -p "$pkgdir/usr/share/e2e-system"; }
 '''
 OLD_KERNEL = '''pkgname=linux-m4-omarchy
@@ -492,6 +492,12 @@ def main():
                 require(sha((root / path).read_bytes()) == digest, 'Staged headphone module missing or wrong: ' + path)
             require((root / 'usr/lib/systemd/system/m4-j713-audio-register.service.d/30-m4-headphones.conf').is_file()
                     and os.access(root / 'usr/bin/m4-headphones', os.X_OK), 'The headphone step is missing')
+            for path, digest in CHANNEL['camera_modules'].items():
+                require(sha((root / path).read_bytes()) == digest, 'Staged camera module missing or wrong: ' + path)
+            require((root / 'usr/lib/systemd/system/m4-j713-camera.service').is_file()
+                    and os.access(root / 'usr/bin/m4-camera', os.X_OK), 'The camera step is missing')
+            require(not (root / 'usr/lib/firmware/apple/isp_2224_01XX.dat').exists(),
+                    'Channel packages must never redistribute owner tuning')
             for path, digest in {**CHANNEL['cpu_idle_module'], **CHANNEL['cpu_guard_module']}.items():
                 require(sha((root / path).read_bytes()) == digest, 'Staged CPU module missing or wrong: ' + path)
             require((root / 'usr/lib/systemd/system/m4-cpu-idle.service').is_file()

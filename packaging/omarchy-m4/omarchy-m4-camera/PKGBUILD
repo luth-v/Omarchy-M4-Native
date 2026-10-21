@@ -1,0 +1,58 @@
+# Maintainer: KB2UKA
+# Contributor: Luthfi Hizb
+# Built and signed by .github/workflows/packages.yml; see docs/package-channel.md.
+# Local tools and notices are staged by tools/build-m4-packages.py.
+# The helper and modules are built out of band, hash-pinned in package-inputs,
+# and joined to their corresponding sources in channel-source-joins.json.
+pkgname=omarchy-m4-camera
+pkgver=1
+pkgrel=3
+pkgdesc='J713 built-in V4L2 camera with qualified owner-local tuning and a boot crash guard'
+arch=('aarch64')
+url='https://github.com/Kb2uka/Omarchy-M4-Native'
+license=('GPL-2.0-only' 'GPL-2.0-or-later' 'BSD-3-Clause' 'MIT')
+# m4-camera and the loader refuse any other kernel release at load time, so a rebuild of
+# linux-m4-omarchy for the same release must not hold back the whole update.
+depends=('python' 'kmod' 'util-linux' 'glibc' 'gcc-libs' 'zlib' 'bzip2' 'linux-m4-omarchy')
+install=omarchy-m4-camera.install
+options=('!strip' '!debug')
+source=('m4-camera.py'
+        'm4-camera-owner.py'
+        'health-on-air.py'
+        'm4-j713-camera.service'
+        'omarchy-m4-camera.conf'
+        'SHA256SUMS'
+        'MIT.txt'
+        'GPL-2.0-only.txt'
+        'apfs-fuse-GPL-2.0-or-later.txt'
+        'lzfse-BSD-3-Clause.txt'
+        'reader-SOURCE-NOTICES.md'
+        "m4-apfs-reader::${url}/releases/download/package-inputs/m4-apfs-reader-cc9e96b8"
+        "j713_isp_d_dt.ko::${url}/releases/download/package-inputs/j713_isp_d_dt-c6d115ec.ko"
+        "j713_isp_cam.ko::${url}/releases/download/package-inputs/j713_isp_cam-ddcdf324.ko")
+sha256sums=('803d6f72c1ed60e8f03c2e0305b5ced738506ced270f8cb6deebabdfad54fe1a'
+            '967fb19bc762dfabfd0d779b2f7339c20ffe2cfec20e5a42040e2b24607c1ede'
+            'fa3c3b9e201df1e7fc6dda2789087114695705019895505282ea2f37285042d1'
+            '0532c700267f22c21df996720137b929e556dbf30fdab267f2ca4023b8d9dac6'
+            '13336310211ea6551d47c5df267a9d826ca117a36bd4016fac3cb817f9b7ed06'
+            '9d456776043239b759481d6c1afc51cdc0b63a6e01a36d6ef03aab3f2fcf7af8'
+            'b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5'
+            'aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3'
+            '8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643'
+            '2a20082c2219edbbdb2e862a0566ba4f762a564ade7c04b09250ae4464bc4b32'
+            '6a84d8468da135385ef9faedaf631449159efafd6face2da001da1d96ec5231a'
+            'cc9e96b8854005154e0f49d6aaa630dd9276d4d99ab9b23777b385dd9551e225'
+            'c6d115ec5ab1f465a2f6c088ec431bb19e5cf437b6247f1cd95032b1b17c634a'
+            'ddcdf32476245d0cb8d803bedcc48d721b7fc1a3677e86ccea86abc3177d01a8')
+
+package() {
+  install -Dm755 m4-apfs-reader "$pkgdir/usr/lib/omarchy-m4/j713-camera/m4-apfs-reader"
+  install -Dm755 m4-camera.py "$pkgdir/usr/bin/m4-camera"
+  install -Dm644 -t "$pkgdir/usr/lib/omarchy-m4/j713-camera" \
+    j713_isp_d_dt.ko j713_isp_cam.ko SHA256SUMS health-on-air.py m4-camera-owner.py
+  install -Dm644 m4-j713-camera.service "$pkgdir/usr/lib/systemd/system/m4-j713-camera.service"
+  install -Dm644 omarchy-m4-camera.conf "$pkgdir/usr/lib/modprobe.d/omarchy-m4-camera.conf"
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" MIT.txt GPL-2.0-only.txt
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" apfs-fuse-GPL-2.0-or-later.txt lzfse-BSD-3-Clause.txt
+  install -Dm644 reader-SOURCE-NOTICES.md "$pkgdir/usr/share/licenses/$pkgname/reader-SOURCE-NOTICES.md"
+}

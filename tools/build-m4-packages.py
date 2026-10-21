@@ -5,7 +5,7 @@
 
 Each package directory under packaging/omarchy-m4/ is copied to a scratch
 tree together with the repository files its PKGBUILD names, then built for
-aarch64. No package compiles code, so an x86_64 host builds them. Sources are
+aarch64. Executable inputs are built out of band and pinned. Sources are
 checked against the PKGBUILD hashes; SOURCE_DATE_EPOCH is the commit time.
 """
 import argparse
@@ -55,6 +55,14 @@ STAGED = {
                               'j713-headphones.lua': HEADPHONES + 'wireplumber/scripts/default-nodes/j713-headphones.lua',
                               'MIT.txt': 'LICENSES/MIT.txt',
                               'GPL-2.0-only.txt': 'LICENSES/GPL-2.0-only.txt'},
+    'omarchy-m4-camera': {'apfs-fuse-GPL-2.0-or-later.txt': 'video/j713/camera/apfs-reader/apfs-fuse-GPL-2.0-or-later.txt',
+                          'lzfse-BSD-3-Clause.txt': 'video/j713/camera/apfs-reader/lzfse-BSD-3-Clause.txt',
+                          'reader-SOURCE-NOTICES.md': 'video/j713/camera/apfs-reader/SOURCE-NOTICES.md',
+                          'm4-camera.py': 'tools/m4-camera.py',
+                          'm4-camera-owner.py': 'tools/m4-camera-owner.py',
+                          'health-on-air.py': 'video/j713/camera/health-on-air.py',
+                          'MIT.txt': 'LICENSES/MIT.txt',
+                          'GPL-2.0-only.txt': 'LICENSES/GPL-2.0-only.txt'},
     'omarchy-m4-cpu': {'m4-cpu-idle.py': 'tools/m4-cpu-idle.py',
                        'MIT.txt': 'LICENSES/MIT.txt',
                        'GPL-2.0-only.txt': 'LICENSES/GPL-2.0-only.txt'},

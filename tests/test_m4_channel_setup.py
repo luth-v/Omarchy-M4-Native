@@ -5,6 +5,7 @@
 The fake base kernel is already current unless a test marks it upgradable. A
 newer installed channel package is not named on the install transaction.
 """
+import hashlib
 import importlib.util
 import io
 import json
@@ -1249,6 +1250,31 @@ class SetupTests(unittest.TestCase):
                 self.assertFalse(self.setup_with(FakeSystem(self.root))['restart_needed'], name + ': nothing loads')
                 (self.root / MODULE.HEADPHONES_STATE / name).unlink()
         (self.root / 'sys/module/snd_soc_j713_headphones').mkdir()
+        self.assertFalse(self.setup_with(FakeSystem(self.root))['restart_needed'], 'already loaded')
+
+    def test_restart_reported_when_the_camera_is_new(self):
+        tuning = 'x' * MODULE.CAMERA_TUNING_SIZE
+        pin = mock.patch.object(MODULE, 'CAMERA_TUNING_SHA256', hashlib.sha256(tuning.encode()).hexdigest())
+        pin.start()
+        self.addCleanup(pin.stop)
+        self.put(MODULE.CAMERA_STAGED, 'staged camera module')
+        self.assertFalse(self.setup_with(FakeSystem(self.root))['restart_needed'], 'not a running system')
+        (self.root / 'sys/module').mkdir(parents=True)
+        self.assertFalse(self.setup_with(FakeSystem(self.root))['restart_needed'], 'no owner tuning: nothing loads')
+        for wrong in ('y' * MODULE.CAMERA_TUNING_SIZE, tuning + 'x'):
+            with self.subTest(wrong=len(wrong)):
+                self.put(MODULE.CAMERA_TUNING, wrong)
+                self.assertFalse(self.setup_with(FakeSystem(self.root))['restart_needed'], 'unqualified tuning')
+        self.put(MODULE.CAMERA_TUNING, tuning)
+        result = self.setup_with(FakeSystem(self.root))
+        self.assertEqual((result['restart_needed'], result['status']),
+                         (True, 'connected; restart once to apply the update'))
+        for name in ('hold', 'attempt'):
+            with self.subTest(name):
+                self.put(MODULE.CAMERA_STATE + '/' + name, '')
+                self.assertFalse(self.setup_with(FakeSystem(self.root))['restart_needed'], name + ': nothing loads')
+                (self.root / MODULE.CAMERA_STATE / name).unlink()
+        (self.root / 'sys/module/j713_isp_cam').mkdir()
         self.assertFalse(self.setup_with(FakeSystem(self.root))['restart_needed'], 'already loaded')
 
     def test_restart_reported_when_cpu_idle_is_new(self):

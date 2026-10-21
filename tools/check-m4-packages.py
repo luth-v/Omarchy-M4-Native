@@ -33,6 +33,8 @@ MCA_DROP_IN = 'usr/lib/systemd/system/m4-j713-audio-register.service.d/25-m4-mca
 SPEAKER_DEP = 'omarchy-m4-speaker>=1-5'
 GPU_DROP_IN = 'usr/lib/systemd/system/m4-gpu.service.d/20-m4-gpu-module.conf'
 HEADPHONES_DROP_IN = 'usr/lib/systemd/system/m4-j713-audio-register.service.d/30-m4-headphones.conf'
+CAMERA_UNIT = 'usr/lib/systemd/system/m4-j713-camera.service'
+CAMERA_READER = 'usr/lib/omarchy-m4/j713-camera/m4-apfs-reader'
 CPU_IDLE_UNIT = 'usr/lib/systemd/system/m4-cpu-idle.service'
 BACKLIGHT_UNIT = 'usr/lib/systemd/system/m4-backlight.service'
 # Installed paths of the headphone UCM and WirePlumber files, relative to their
@@ -298,6 +300,7 @@ def check_package(channel, package, info, files, root, joins=None):
         forward = (kernel['image_sha256'], boot_kernel['image_sha256'])
         require(forward in policy['KERNEL_TRANSITIONS'] and (forward[1], forward[0]) in policy['KERNEL_TRANSITIONS'],
                 'Boot kernel transition pair is not exact')
+        require('omarchy-m4-camera' in names, 'Boot package must require the camera package')
         # Both notch preferences must carry the display handoff required by this DT.
         for path, digest in channel['backlight_loaders'].items():
             require(files.get(path) == (0o644, digest), 'Staged display handoff stage2 differs from the pin: ' + path)
@@ -346,6 +349,44 @@ def check_package(channel, package, info, files, root, joins=None):
         for path in HEADPHONES_POLICY:
             source = (ROOT / 'audio/j713/headphones/policy' / path).read_bytes()
             require(files.get(path) == (0o644, sha(source)), 'Packaged headphone policy differs: ' + path)
+    elif name == 'omarchy-m4-camera':
+        for path, digest in channel['camera_modules'].items():
+            require(files.get(path) == (0o644, digest), 'Staged camera module differs from the pin: ' + path)
+        sources = {
+            'usr/bin/m4-camera': ('tools/m4-camera.py', 0o755),
+            'usr/lib/omarchy-m4/j713-camera/m4-camera-owner.py': ('tools/m4-camera-owner.py', 0o644),
+            'usr/lib/omarchy-m4/j713-camera/health-on-air.py': ('video/j713/camera/health-on-air.py', 0o644),
+            'usr/lib/omarchy-m4/j713-camera/SHA256SUMS': ('packaging/omarchy-m4/omarchy-m4-camera/SHA256SUMS', 0o644),
+            CAMERA_UNIT: ('packaging/omarchy-m4/omarchy-m4-camera/m4-j713-camera.service', 0o644),
+            'usr/lib/modprobe.d/omarchy-m4-camera.conf': ('packaging/omarchy-m4/omarchy-m4-camera/omarchy-m4-camera.conf', 0o644),
+        }
+        for path, (source, mode) in sources.items():
+            require(files.get(path) == (mode, sha((ROOT / source).read_bytes())), 'Packaged camera file differs: ' + path)
+        require(info.get('.INSTALL') == [sha((ROOT / 'packaging/omarchy-m4/omarchy-m4-camera/omarchy-m4-camera.install').read_bytes())],
+                'Packaged camera install hook differs')
+        helper = runpy.run_path(str(root / 'usr/bin/m4-camera'))
+        require(helper['RELEASE'] == kernel['release'], 'Camera tool pins a different kernel')
+        for path, digest in channel['camera_modules'].items():
+            require(helper['PINS'].get(Path(path).name) == digest, 'Camera tool pins a different module')
+        require(helper['parse_sums']((root / 'usr/lib/omarchy-m4/j713-camera/SHA256SUMS').read_bytes()) == helper['PINS'],
+                'Camera manifest differs from the tool pins')
+        reader = root / CAMERA_READER
+        require(reader.is_file() and not reader.is_symlink(), 'Camera APFS reader missing')
+        data = reader.read_bytes()
+        require(files.get(CAMERA_READER) == (0o755, sha(data)) and
+                data[:7] == b'\x7fELF\x02\x01\x01' and len(data) >= 64 and
+                int.from_bytes(data[18:20], 'little') == 183,
+                'Camera APFS reader must be an executable AArch64 ELF')
+        require(b'--image' not in data, 'Camera APFS reader must not enable test-image input')
+        require(channel['camera_reader'].get(CAMERA_READER) == sha(data),
+                'Camera APFS reader differs from the pin')
+        for notice in ('apfs-fuse-GPL-2.0-or-later.txt', 'lzfse-BSD-3-Clause.txt', 'reader-SOURCE-NOTICES.md'):
+            require('usr/share/licenses/omarchy-m4-camera/' + notice in files,
+                    'Camera reader license notice missing: ' + notice)
+        # The tool and loader gate the kernel release; a package-release pin would block updates.
+        require(set(info.get('depend', [])) == {'python', 'kmod', 'util-linux', 'glibc', 'gcc-libs',
+                                               'zlib', 'bzip2', 'linux-m4-omarchy'},
+                'Camera dependencies changed')
     elif name == 'omarchy-m4-cpu':
         for path, digest in channel['cpu_idle_module'].items():
             require(files.get(path, (0, ''))[1] == digest, 'Staged CPU idle module differs from the pin: ' + path)

@@ -14,7 +14,8 @@
     "omarchy-m4-headphones",
     "omarchy-m4-cpu",
     "omarchy-m4-evdi",
-    "omarchy-m4-backlight"
+    "omarchy-m4-backlight",
+    "omarchy-m4-camera"
   ],
   "kernel": {
     "release": "7.1.9-m4-gpu-backport-20261008",
@@ -98,6 +99,13 @@
       "usr/lib/omarchy-m4/backlight/module.json",
       "usr/lib/systemd/system/m4-backlight.service",
       "usr/share/licenses/omarchy-m4-backlight/"
+    ],
+    "omarchy-m4-camera": [
+      "usr/bin/m4-camera",
+      "usr/lib/omarchy-m4/j713-camera/",
+      "usr/lib/systemd/system/m4-j713-camera.service",
+      "usr/lib/modprobe.d/omarchy-m4-camera.conf",
+      "usr/share/licenses/omarchy-m4-camera/"
     ]
   },
   "protected_paths": [
@@ -136,7 +144,8 @@
     "usr/share/wireplumber/wireplumber.conf.d/83-j713-headphones.conf": "names the headphone sink and the headset mic source and adds their default-node hook as an optional component",
     "usr/share/wireplumber/scripts/default-nodes/j713-headphones.lua": "the headphone default-node hook; it only selects the headphone sink and the headset mic while they are available",
     "usr/lib/systemd/system/m4-cpu-idle.service": "loads the J713 CPU idle driver (#65) at boot, with a one-strike guard",
-    "usr/lib/systemd/system/m4-backlight.service": "loads the verified J713 native backlight after the per-boot display handoff; a one-strike guard prevents repeated failed startup"
+    "usr/lib/systemd/system/m4-backlight.service": "loads the verified J713 native backlight after the per-boot display handoff; a one-strike guard prevents repeated failed startup",
+    "usr/lib/systemd/system/m4-j713-camera.service": "loads the qualified J713 camera once per boot with a one-strike guard; boot targets do not wait"
   },
   "speaker_module": {
     "usr/lib/omarchy-m4/j713-audio/snd-soc-j713-group.ko": "aaad802eb136ff6cb915feaa123001b3eb848bc2f038d0a5b71c8e2ff35d2581"
@@ -180,5 +189,12 @@
   },
   "evdi_library": {
     "usr/lib/libevdi.so": "0f1da52db1f7cbd7e0c420d47285ddee78e22dc0a57e789305c1456b163034ce"
+  },
+  "camera_modules": {
+    "usr/lib/omarchy-m4/j713-camera/j713_isp_cam.ko": "ddcdf32476245d0cb8d803bedcc48d721b7fc1a3677e86ccea86abc3177d01a8",
+    "usr/lib/omarchy-m4/j713-camera/j713_isp_d_dt.ko": "c6d115ec5ab1f465a2f6c088ec431bb19e5cf437b6247f1cd95032b1b17c634a"
+  },
+  "camera_reader": {
+    "usr/lib/omarchy-m4/j713-camera/m4-apfs-reader": "cc9e96b8854005154e0f49d6aaa630dd9276d4d99ab9b23777b385dd9551e225"
   }
 }

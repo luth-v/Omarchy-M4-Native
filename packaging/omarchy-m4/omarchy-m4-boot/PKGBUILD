@@ -5,15 +5,16 @@
 # and the m1n1-* notices from display/j713/m1n1-base/, by tools/build-m4-packages.py.
 pkgname=omarchy-m4-boot
 pkgver=1
-pkgrel=19
+pkgrel=20
 pkgdesc='Keeps the J713 boot.bin in step with the packaged M4 kernel and devicetree'
 arch=('aarch64')
 url='https://github.com/Kb2uka/Omarchy-M4-Native'
 # The notch stage 2 is an m1n1 build: MIT, with the embedded parts its README lists.
 # GPL-2.0-only covers the retained-bounds kernel image staged beside the base package.
 license=('MIT' 'GPL-2.0-only' 'GPL-2.0-or-later OR MIT' 'BSD-2-Clause OR GPL-2.0-or-later' 'BSD-3-Clause' 'Zlib' 'CC0-1.0' 'OFL-1.1')
-# omarchy-m4-gpu (from 1-6), omarchy-m4-headphones (from 1-7), omarchy-m4-cpu (from 1-10) and
-# omarchy-m4-evdi (from 1-13) and omarchy-m4-backlight (from 1-14): an older
+# omarchy-m4-gpu (from 1-6), omarchy-m4-headphones (from 1-7), omarchy-m4-cpu (from 1-10),
+# omarchy-m4-evdi (from 1-13), omarchy-m4-backlight (from 1-14) and
+# omarchy-m4-camera (from 1-20): an older
 # installed setup script does not list them, so this pulls them in on the first
 # omarchy-m4-update run that installs this version.
 # omarchy-m4-speaker>=1-5 (from 1-19): an older setup request omits the speaker
@@ -29,7 +30,7 @@ license=('MIT' 'GPL-2.0-only' 'GPL-2.0-or-later OR MIT' 'BSD-2-Clause OR GPL-2.0
 # notch helper uses that resume command. A non-regular hold is refused, a
 # non-string kernel pin is refused, and a refusal names the rooted recovery
 # journal. Boot 1-18 preserves boot holds and newer installed channel packages.
-depends=('python' 'pacman' 'omarchy-m4-gpu' 'omarchy-m4-headphones' 'omarchy-m4-cpu' 'omarchy-m4-evdi' 'omarchy-m4-backlight' 'omarchy-m4-speaker>=1-5')
+depends=('python' 'pacman' 'omarchy-m4-gpu' 'omarchy-m4-headphones' 'omarchy-m4-cpu' 'omarchy-m4-evdi' 'omarchy-m4-backlight' 'omarchy-m4-speaker>=1-5' 'omarchy-m4-camera')
 install=omarchy-m4-boot.install
 options=('!strip' '!debug')
 # The CPU frequency, CPU temperature, CPU thermal zone and boost-state devicetree, with P
@@ -58,7 +59,7 @@ sha256sums=('6ace30fa8c07cffbd6ea3af654e1697e77425cae74d6ee91903f2f28238b6a02'
             'aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3'
             'aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3'
             'a116d5a6aa09bc2aec1393ef737f21d9cc0eaac474615cb215f48491b7db8a56'
-            '8277cc4615875db20c585fcbef67b8e96490d828f4b86de41b98c4c3c1d009dc'
+            'f57c48ff3c18ddb3bd519ccb540dc4b0a4d33e16bea82a2245045343f1038e01'
             'bde52f8012b209e06c0e2b41325413c642ae4c6e6eedce7ff04331ca4d50c0f1'
             'f605580fc7e8e672cee85f5afee930550b8f445f026b5a04c1828e52c88ea6de'
             'afb025a8f1c946d164fe962f20b2e9d5cd987cfc668985eee62e41767722b2aa'
