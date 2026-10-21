@@ -359,13 +359,13 @@ def patch_main(data):
     text = data.decode('utf-8')
     changes = {
         'import system, osenum, stub, diskutil, osinstall, gravity_firmware, m1n1\n':
-        'import system, osenum, stub, diskutil, osinstall, gravity_firmware, m1n1\nimport j713_owner_assets\n',
+        'import system, osenum, stub, diskutil, osinstall, gravity_firmware, m1n1\nimport j713_owner_assets, j713_camera_owner\n',
         '    def __init__(self, version):\n':
         '    def __init__(self, version):\n        self.owner_assets = j713_owner_assets.prepare_for_installer()\n',
         '        self.ins.collect_firmware(fw_pkg)\n':
-        '        self.ins.collect_firmware(fw_pkg)\n        j713_owner_assets.add_to_firmware(fw_pkg, self.owner_assets)\n',
+        '        self.ins.collect_firmware(fw_pkg)\n        j713_owner_assets.add_to_firmware(fw_pkg, self.owner_assets)\n        j713_camera_owner.add_to_firmware(fw_pkg)\n',
         '            self.ins.collect_firmware(pkg)\n':
-        '            self.ins.collect_firmware(pkg)\n            j713_owner_assets.add_to_firmware(pkg, self.owner_assets)\n',
+        '            self.ins.collect_firmware(pkg)\n            j713_owner_assets.add_to_firmware(pkg, self.owner_assets)\n            j713_camera_owner.add_to_firmware(pkg)\n',
     }
     for old, new in changes.items():
         require(text.count(old) == 1, 'Installer source seam changed: ' + old.strip())
@@ -384,7 +384,8 @@ def repack_installer(source, destination, module, source_archive=False, stage1=N
             name = item.name.removeprefix('./')
             require(name not in names, 'Duplicate installer member')
             names.add(name)
-            require(name != addition, 'Installer module already exists')
+            require(name not in (addition, str(Path(addition).with_name('j713_camera_owner.py'))),
+                    'Installer module already exists')
             if name == entry:
                 require(item.isfile(), 'Installer entry is not regular')
                 data = patch_main(old.extractfile(item).read())
@@ -409,6 +410,10 @@ def repack_installer(source, destination, module, source_archive=False, stage1=N
         item = tarfile.TarInfo(addition)
         item.mode, item.size = 0o644, len(module)
         new.addfile(item, io.BytesIO(module))
+        camera = Path(__file__).with_name('m4-camera-owner.py').read_bytes()
+        item = tarfile.TarInfo(str(Path(addition).with_name('j713_camera_owner.py')))
+        item.mode, item.size = 0o644, len(camera)
+        new.addfile(item, io.BytesIO(camera))
 
 
 def clean_integration(source, destination):

@@ -655,6 +655,8 @@ class InstallerStage1Tests(unittest.TestCase):
         self.assertEqual({k: v for k, v in after.items() if k != './boot/m1n1.bin'},
                          {k: v for k, v in before.items() if k != './boot/m1n1.bin'})
         self.assertIn('j713_owner_assets.py', after)
+        self.assertEqual(after['j713_camera_owner.py'], (ROOT / 'tools/m4-camera-owner.py').read_bytes())
+        self.assertIn(b'j713_camera_owner.add_to_firmware(fw_pkg)', after['./main.py'])
 
     def test_unknown_or_missing_installer_loader_refuses(self):
         for members, message in (

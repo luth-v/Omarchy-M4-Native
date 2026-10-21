@@ -1,0 +1,1596 @@
+--- a/ApfsLib/ApfsContainer.cpp
++++ b/ApfsLib/ApfsContainer.cpp
+@@ -26,6 +26,7 @@
+ #include "Util.h"
+ #include "BlockDumper.h"
+ #include "Global.h"
++#include "ReaderLimits.h"
+ 
+ int g_debug = 0;
+ bool g_lax = false;
+@@ -53,185 +54,74 @@
+ 
+ bool ApfsContainer::Init(xid_t req_xid)
+ {
+-	std::vector<uint8_t> blk;
+-
+-	blk.resize(0x1000);
+-
+-	if (!m_main_disk->Read(blk.data(), m_main_part_start, 0x1000))
+-	{
+-		std::cerr << "Reading block 0 from main device failed." << std::endl;
+-		return false;
+-	}
+-
+-	memcpy(&m_nx, blk.data(), sizeof(nx_superblock_t));
+-
+-	if (m_nx.nx_magic != NX_MAGIC)
+-	{
+-		std::cerr << "This doesn't seem to be an apfs volume (invalid superblock)." << std::endl;
+-		return false;
+-	}
+-
+-	if (m_nx.nx_block_size != 0x1000)
+-	{
+-		blk.resize(m_nx.nx_block_size);
+-		m_main_disk->Read(blk.data(), m_main_part_start, blk.size());
+-	}
+-
+-	if (!VerifyBlock(blk.data(), blk.size()))
+-		return false;
+-
+-	memcpy(&m_nx, blk.data(), sizeof(nx_superblock_t));
+-
+-	// Scan container for most recent superblock (might fix segfaults)
+-	uint64_t max_xid = 0;
+-	paddr_t max_paddr = 0;
+-	paddr_t paddr;
+-	std::vector<uint8_t> tmp;
+-
+-	tmp.resize(m_nx.nx_block_size);
+-
+-	for (paddr = m_nx.nx_xp_desc_base; paddr < (m_nx.nx_xp_desc_base + m_nx.nx_xp_desc_blocks); paddr++)
+-	{
+-		if (!ReadBlocks(tmp.data(), paddr, 1))
+-			return false;
+-
+-		if (!VerifyBlock(tmp.data(), tmp.size()))
+-			continue;
+-
+-		const nx_superblock_t *sb = reinterpret_cast<const nx_superblock_t *>(tmp.data());
+-		if ((sb->nx_o.o_type & OBJECT_TYPE_MASK) != OBJECT_TYPE_NX_SUPERBLOCK)
+-			continue;
+-
+-		if (req_xid) {
+-			if (req_xid == sb->nx_o.o_xid) {
+-				max_xid = req_xid;
+-				max_paddr = paddr;
+-				break;
+-			}
+-		} else {
+-			if (sb->nx_o.o_xid > max_xid)
+-			{
+-				max_xid = sb->nx_o.o_xid;
+-				max_paddr = paddr;
+-			}
+-		}
+-	}
+-
+-	if (max_paddr)
+-	{
+-		// if (g_debug & Dbg_Errors)
+-		//	std::cout << "Found more recent xid " << max_xid << " than superblock 0 contained (" << m_nx.nx_o.o_xid << ")." << std::endl;
+-		if (g_debug & Dbg_Info)
+-			std::cout << "Mounting xid different from NXSB at 0 (xid = " << m_nx.nx_o.o_xid << "). xid = " << max_xid << std::endl;
+-
+-		ReadBlocks(tmp.data(), max_paddr, 1);
+-
+-		memcpy(&m_nx, tmp.data(), sizeof(nx_superblock_t));
+-	}
+-
+-	if (g_debug & Dbg_Info)
+-		std::cout << "Mounting xid " << m_nx.nx_o.o_xid << std::endl;
+-
+-	if ((m_nx.nx_incompatible_features & NX_INCOMPAT_FUSION) && !m_tier2_disk)
+-	{
+-		std::cerr << "Need to specify two devices for a fusion drive." << std::endl;
+-		return false;
+-	}
+-
+-	if (!m_cpm.Init(m_nx.nx_xp_desc_base + m_nx.nx_xp_desc_index, m_nx.nx_xp_desc_len - 1))
+-	{
+-		std::cerr << "Failed to load checkpoint map" << std::endl;
+-		return false;
+-	}
+-
+-	if (!m_omap.Init(m_nx.nx_omap_oid, m_nx.nx_o.o_xid))
+-	{
+-		std::cerr << "Failed to load nx omap" << std::endl;
+-		return false;
+-	}
+-
+-	omap_res_t omr;
+-	if (!m_cpm.Lookup(omr, m_nx.nx_spaceman_oid, m_nx.nx_o.o_xid))
+-	{
+-		std::cerr << "Failed to map spaceman oid" << std::endl;
+-		return false;
+-	}
+-
+-	m_sm_data.resize(omr.size);
+-	ReadBlocks(m_sm_data.data(), omr.paddr, omr.size / GetBlocksize());
+-	m_sm = reinterpret_cast<const spaceman_phys_t *>(m_sm_data.data());
+-
+-	if (!VerifyBlock(m_sm_data.data(), m_sm_data.size())) {
+-		std::cerr << "Checksum error in spaceman" << std::endl;
+-		return false;
+-	}
+-
+-	if ((m_sm->sm_o.o_type & OBJECT_TYPE_MASK) != OBJECT_TYPE_SPACEMAN)
+-	{
+-		std::cerr << "Spaceman has wrong type " << m_sm->sm_o.o_type << std::endl;
+-		return false;
+-	}
+-
+-	if (m_sm->sm_fq[SFQ_IP].sfq_tree_oid != 0)
+-		m_fq_tree_mgr.Init(m_sm->sm_fq[SFQ_IP].sfq_tree_oid, m_sm->sm_o.o_xid, &m_cpm);
+-
+-	if (m_sm->sm_fq[SFQ_MAIN].sfq_tree_oid != 0)
+-		m_fq_tree_vol.Init(m_sm->sm_fq[SFQ_MAIN].sfq_tree_oid, m_sm->sm_o.o_xid, &m_cpm);
+-
+-	// m_omap_tree.Init(m_nx.nx_omap_oid, m_nx.hdr.o_xid, nullptr);
+-
+-	// m_sb.nx_spaceman_oid
+-
+-	if ((m_nx.nx_keylocker.pr_start_addr != 0) && (m_nx.nx_keylocker.pr_block_count != 0))
+-	{
+-		if (!m_keymgr.Init(m_nx.nx_keylocker.pr_start_addr, m_nx.nx_keylocker.pr_block_count, m_nx.nx_uuid))
+-		{
+-			std::cerr << "Initialization of KeyManager failed." << std::endl;
+-			return false;
+-		}
+-	}
+-
+-	return true;
++    using M4Apfs::Require;
++    std::vector<uint8_t> blk(4096);
++    Require(m_main_disk->Read(blk.data(), m_main_part_start, blk.size()), "CONTAINER_HEADER_READ");
++    memcpy(&m_nx, blk.data(), sizeof(m_nx));
++    const uint32_t blocksize = m_nx.nx_block_size;
++    Require(m_nx.nx_magic == NX_MAGIC, "NOT_APFS");
++    Require(blocksize >= 4096 && blocksize <= 65536 && !(blocksize & (blocksize - 1)), "BLOCK_SIZE");
++    blk.resize(blocksize);
++    Require(m_main_disk->Read(blk.data(), m_main_part_start, blk.size()), "CONTAINER_HEADER_READ");
++    Require(VerifyBlock(blk.data(), blk.size()), "CONTAINER_HEADER_CHECKSUM");
++
++    auto geometry = [&](const nx_superblock_t &sb) {
++        Require(sb.nx_magic == NX_MAGIC && sb.nx_block_size == blocksize, "CHECKPOINT_GEOMETRY");
++        Require((sb.nx_o.o_type & OBJECT_TYPE_MASK) == OBJECT_TYPE_NX_SUPERBLOCK, "CHECKPOINT_TYPE");
++        Require(sb.nx_block_count && sb.nx_block_count <= m_main_part_len / blocksize, "CONTAINER_SIZE");
++        Require(!(sb.nx_xp_desc_blocks & 0x80000000U), "CHECKPOINT_DESCRIPTOR_TREE_UNSUPPORTED");
++        Require(sb.nx_xp_desc_blocks > 0 && sb.nx_xp_desc_blocks <= M4Apfs::MaxCheckpoints, "CHECKPOINT_LIMIT");
++        Require(sb.nx_xp_desc_base > 0 && sb.nx_xp_desc_base < sb.nx_block_count &&
++                sb.nx_xp_desc_blocks <= sb.nx_block_count - sb.nx_xp_desc_base, "CHECKPOINT_RANGE");
++        Require(sb.nx_xp_desc_index < sb.nx_xp_desc_blocks && sb.nx_xp_desc_len >= 2 &&
++                sb.nx_xp_desc_len <= sb.nx_xp_desc_blocks, "CHECKPOINT_MAP_RANGE");
++        Require(sb.nx_max_file_systems <= NX_MAX_FILE_SYSTEMS, "VOLUME_COUNT_LIMIT");
++        if (sb.nx_incompatible_features & ~NX_SUPPORTED_INCOMPAT_MASK)
++            std::cerr << "Container incompat flags: 0x" << std::hex << sb.nx_incompatible_features << std::dec << "\n";
++        Require(!(sb.nx_incompatible_features & ~NX_SUPPORTED_INCOMPAT_MASK), "CONTAINER_UNKNOWN_INCOMPAT");
++        Require(!(sb.nx_incompatible_features & NX_INCOMPAT_FUSION), "FUSION_UNSUPPORTED");
++    };
++    geometry(m_nx);
++    nx_superblock_t selected = m_nx;
++    bool found = !req_xid || req_xid == selected.nx_o.o_xid;
++    std::vector<uint8_t> tmp(blocksize);
++    const uint64_t base = m_nx.nx_xp_desc_base;
++    const uint64_t count = m_nx.nx_xp_desc_blocks;
++    for (uint64_t n = 0; n < count; ++n) {
++        Require(ReadBlocks(tmp.data(), base + n, 1), "CHECKPOINT_READ");
++        if (!VerifyBlock(tmp.data(), tmp.size())) continue;
++        const auto *sb = reinterpret_cast<const nx_superblock_t *>(tmp.data());
++        if ((sb->nx_o.o_type & OBJECT_TYPE_MASK) != OBJECT_TYPE_NX_SUPERBLOCK) continue;
++        if ((req_xid && sb->nx_o.o_xid == req_xid) ||
++            (!req_xid && sb->nx_o.o_xid > selected.nx_o.o_xid)) {
++            geometry(*sb);
++            selected = *sb;
++            found = true;
++        }
++    }
++    Require(found, "CHECKPOINT_XID_MISSING");
++    m_nx = selected;
++    Require(m_cpm.Init(m_nx.nx_xp_desc_base + m_nx.nx_xp_desc_index, m_nx.nx_xp_desc_len - 1),
++            "CHECKPOINT_MAP_INIT");
++    Require(m_omap.Init(m_nx.nx_omap_oid, m_nx.nx_o.o_xid), "CONTAINER_OMAP_INIT");
++    // Spaceman/free queues are irrelevant to a reader. Do not parse allocator metadata.
++    // KeyManager::Init can decrypt even without a password (using the container UUID).
++    // Omit it entirely: absent, unreadable and hardware keybags cannot block plaintext System.
++    if (m_nx.nx_keylocker.pr_start_addr || m_nx.nx_keylocker.pr_block_count ||
++        m_nx.nx_mkb_locker.pr_start_addr || m_nx.nx_mkb_locker.pr_block_count)
++        std::cerr << "NOTE KEYLOCKER_SKIPPED: keybag init/decryption disabled; continuing unencrypted-only; encrypted volumes refused\n";
++    return true;
+ }
+ 
+ ApfsVolume *ApfsContainer::GetVolume(unsigned int fsid, const std::string &passphrase, xid_t snap_xid)
+ {
+-	ApfsVolume *vol = nullptr;
+-	oid_t oid;
+-	omap_res_t omr;
+-	bool rc;
+-
+-	if (fsid >= 100)
+-		return nullptr;
+-
+-	m_passphrase = passphrase;
+-
+-	oid = m_nx.nx_fs_oid[fsid];
+-
+-	if (oid == 0)
+-		return nullptr;
+-
+-	if (!m_omap.Lookup(omr, oid, m_nx.nx_o.o_xid))
+-		return nullptr;
+-
+-	// std::cout << std::hex << "Loading Volume " << index << ", nodeid = " << nodeid << ", version = " << m_sb.hdr.version << ", blkid = " << blkid << std::endl;
+-
+-	if (omr.paddr == 0)
+-		return nullptr;
+-
+-	vol = new ApfsVolume(*this);
+-	if (snap_xid != 0)
+-		rc = vol->MountSnapshot(omr.paddr, snap_xid);
+-	else
+-		rc = vol->Init(omr.paddr);
+-
+-	if (rc == false)
+-	{
+-		delete vol;
+-		vol = nullptr;
+-	}
+-
+-	return vol;
++    M4Apfs::Require(passphrase.empty(), "CREDENTIALS_DISABLED");
++    if (fsid >= NX_MAX_FILE_SYSTEMS || !m_nx.nx_fs_oid[fsid]) return nullptr;
++    omap_res_t mapping;
++    if (!m_omap.Lookup(mapping, m_nx.nx_fs_oid[fsid], m_nx.nx_o.o_xid) || !mapping.paddr) return nullptr;
++    std::unique_ptr<ApfsVolume> volume(new ApfsVolume(*this));
++    const bool ok = snap_xid ? volume->MountSnapshot(mapping.paddr, snap_xid) : volume->Init(mapping.paddr);
++    return ok ? volume.release() : nullptr;
+ }
+ 
+ bool ApfsContainer::GetVolumeInfo(unsigned int fsid, apfs_superblock_t& apsb)
+@@ -260,38 +150,22 @@
+ 		return false;
+ 
+ 	memcpy(&apsb, apsb_raw.data(), sizeof(apfs_superblock_t));
++	M4Apfs::Require(apsb.apfs_magic == APFS_MAGIC &&
++	    (apsb.apfs_o.o_type & OBJECT_TYPE_MASK) == OBJECT_TYPE_FS, "VOLUME_SUPERBLOCK_TYPE");
+ 
+ 	return true;
+ }
+ 
+ 
+-bool ApfsContainer::ReadBlocks(uint8_t * data, paddr_t paddr, uint64_t blkcnt) const
+-{
+-	uint64_t offs;
+-	uint64_t size;
+-
+-	//if ((paddr + blkcnt) > m_nx.nx_block_count)
+-	//	return false;
+-
+-	offs = m_nx.nx_block_size * paddr;
+-	size = m_nx.nx_block_size * blkcnt;
+-
+-	if (offs & FUSION_TIER2_DEVICE_BYTE_ADDR)
+-	{
+-		if (!m_tier2_disk)
+-			return false;
+-
+-		offs = offs - FUSION_TIER2_DEVICE_BYTE_ADDR + m_tier2_part_start;
+-		return m_tier2_disk->Read(data, offs, size);
+-	}
+-	else
+-	{
+-		if (!m_main_disk)
+-			return false;
+-
+-		offs = offs + m_main_part_start;
+-		return m_main_disk->Read(data, offs, size);
+-	}
++bool ApfsContainer::ReadBlocks(uint8_t *data, paddr_t paddr, uint64_t blkcnt) const
++{
++    M4Apfs::Step();
++    const uint64_t bs = m_nx.nx_block_size;
++    M4Apfs::Require(bs >= 4096 && bs <= 65536, "BLOCK_SIZE");
++    M4Apfs::Require(paddr >= 0 && uint64_t(paddr) < m_nx.nx_block_count && blkcnt &&
++                    blkcnt <= m_nx.nx_block_count - uint64_t(paddr), "BLOCK_RANGE");
++    M4Apfs::Require(blkcnt <= M4Apfs::MaxBytes / bs, "BLOCK_READ_LIMIT");
++    return m_main_disk->Read(data, m_main_part_start + bs * uint64_t(paddr), bs * blkcnt);
+ }
+ 
+ bool ApfsContainer::ReadAndVerifyHeaderBlock(uint8_t * data, paddr_t paddr) const
+@@ -310,22 +184,9 @@
+ 	return true;
+ }
+ 
+-bool ApfsContainer::GetVolumeKey(uint8_t *key, const apfs_uuid_t & vol_uuid, const char *password)
+-{
+-	if (!m_keymgr.IsValid())
+-		return false;
+-
+-	if (password)
+-	{
+-		return m_keymgr.GetVolumeKey(key, vol_uuid, password);
+-	}
+-	else
+-	{
+-		if (m_passphrase.empty())
+-			return false;
+-
+-		return m_keymgr.GetVolumeKey(key, vol_uuid, m_passphrase.c_str());
+-	}
++bool ApfsContainer::GetVolumeKey(uint8_t *, const apfs_uuid_t &, const char *)
++{
++    throw std::runtime_error("DECRYPTION_DISABLED");
+ }
+ 
+ bool ApfsContainer::GetPasswordHint(std::string & hint, const apfs_uuid_t & vol_uuid)
+--- a/ApfsLib/ApfsContainer.h
++++ b/ApfsLib/ApfsContainer.h
+@@ -47,6 +47,7 @@
+ 	bool ReadBlocks(uint8_t *data, paddr_t paddr, uint64_t blkcnt = 1) const;
+ 	bool ReadAndVerifyHeaderBlock(uint8_t *data, paddr_t paddr) const;
+ 
++	const nx_superblock_t &Superblock() const { return m_nx; }
+ 	uint32_t GetBlocksize() const { return m_nx.nx_block_size; }
+ 	uint64_t GetBlockCount() const { return m_nx.nx_block_count; }
+ 	uint64_t GetFreeBlocks() const { return m_sm->sm_dev[SD_MAIN].sm_free_count + m_sm->sm_dev[SD_TIER2].sm_free_count; }
+--- a/ApfsLib/ApfsDir.cpp
++++ b/ApfsLib/ApfsDir.cpp
+@@ -29,6 +29,7 @@
+ #include "ApfsContainer.h"
+ #include "BTree.h"
+ #include "Util.h"
++#include "ReaderLimits.h"
+ 
+ #ifndef _MSC_VER
+ template<size_t L>
+@@ -194,6 +195,7 @@
+ 	if (!rc || (bte.val == nullptr))
+ 		return false;
+ 
++    M4Apfs::Require(bte.val_len >= sizeof(j_inode_val_t), "INODE_SIZE");
+ 	// const uint8_t *idata = reinterpret_cast<const uint8_t *>(bte.val);
+ 	const j_inode_val_t *obj = reinterpret_cast<const j_inode_val_t *>(bte.val);
+ 
+@@ -223,28 +225,33 @@
+ 
+ 	if (bte.val_len > sizeof(j_inode_val_t))
+ 	{
++        M4Apfs::Require(bte.val_len - sizeof(j_inode_val_t) >= sizeof(xf_blob_t), "INODE_XFIELD_HEADER");
+ 		const xf_blob_t *xf_hdr = reinterpret_cast<const xf_blob_t *>(obj->xfields);
++        M4Apfs::Require(xf_hdr->xf_num_exts <= (bte.val_len - sizeof(j_inode_val_t) - sizeof(xf_blob_t)) /
++                        sizeof(x_field_t), "INODE_XFIELD_COUNT");
+ 		const x_field_t *xf = reinterpret_cast<const x_field_t *>(xf_hdr->xf_data);
+ 		const uint8_t *xdata = obj->xfields + sizeof(xf_blob_t) + xf_hdr->xf_num_exts * sizeof(x_field_t);
+ 		uint16_t n;
+ 
+ 		for (n = 0; n < xf_hdr->xf_num_exts; n++)
+ 		{
++            const auto *end = reinterpret_cast<const uint8_t *>(bte.val) + bte.val_len;
++            M4Apfs::Require(xdata <= end && xf[n].x_size <= size_t(end - xdata), "INODE_XFIELD_RANGE");
+ 			switch (xf[n].x_type)
+ 			{
+ 			case INO_EXT_TYPE_SNAP_XID:
+-				assert(xf[n].x_size == sizeof(uint64_t));
+-				res.snap_xid = bswap_le(*reinterpret_cast<const uint64_t *>(xdata));
++				M4Apfs::Require(xf[n].x_size == sizeof(uint64_t), "INODE_XFIELD_SIZE");
++				res.snap_xid = bswap_le(M4Apfs::Load<uint64_t>(xdata));
+ 				res.optional_present_flags |= Inode::INO_HAS_SNAP_XID;
+ 				break;
+ 			case INO_EXT_TYPE_DELTRA_TREE_OID:
+-				assert(xf[n].x_size == sizeof(uint64_t));
+-				res.delta_tree_oid = bswap_le(*reinterpret_cast<const uint64_t *>(xdata));
++				M4Apfs::Require(xf[n].x_size == sizeof(uint64_t), "INODE_XFIELD_SIZE");
++				res.delta_tree_oid = bswap_le(M4Apfs::Load<uint64_t>(xdata));
+ 				res.optional_present_flags |= Inode::INO_HAS_DELTA_TREE_OID;
+ 				break;
+ 			case INO_EXT_TYPE_DOCUMENT_ID:
+-				assert(xf[n].x_size == sizeof(uint32_t));
+-				res.document_id = bswap_le(*reinterpret_cast<const uint32_t *>(xdata));
++				M4Apfs::Require(xf[n].x_size == sizeof(uint32_t), "INODE_XFIELD_SIZE");
++				res.document_id = bswap_le(M4Apfs::Load<uint32_t>(xdata));
+ 				res.optional_present_flags |= Inode::INO_HAS_DOCUMENT_ID;
+ 				break;
+ 			case INO_EXT_TYPE_NAME:
+@@ -252,8 +259,8 @@
+ 				res.optional_present_flags |= Inode::INO_HAS_NAME;
+ 				break;
+ 			case INO_EXT_TYPE_PREV_FSIZE:
+-				assert(xf[n].x_size == sizeof(uint64_t));
+-				res.prev_fsize = bswap_le(*reinterpret_cast<const uint64_t *>(xdata));
++				M4Apfs::Require(xf[n].x_size == sizeof(uint64_t), "INODE_XFIELD_SIZE");
++				res.prev_fsize = bswap_le(M4Apfs::Load<uint64_t>(xdata));
+ 				res.optional_present_flags |= Inode::INO_HAS_PREV_FSIZE;
+ 				break;
+ 			case INO_EXT_TYPE_FINDER_INFO:
+@@ -261,7 +268,7 @@
+ 				break;
+ 			case INO_EXT_TYPE_DSTREAM:
+ 			{
+-				assert(xf[n].x_size == sizeof(j_dstream_t));
++				M4Apfs::Require(xf[n].x_size == sizeof(j_dstream_t), "INODE_XFIELD_SIZE");
+ 				const j_dstream_t *ds = reinterpret_cast<const j_dstream_t *>(xdata);
+ 				res.ds_size = ds->size;
+ 				res.ds_alloced_size = ds->alloced_size;
+@@ -275,13 +282,13 @@
+ 				// TODO
+ 				break;
+ 			case INO_EXT_TYPE_FS_UUID:
+-				assert(xf[n].x_size == sizeof(apfs_uuid_t));
++				M4Apfs::Require(xf[n].x_size == sizeof(apfs_uuid_t), "INODE_XFIELD_SIZE");
+ 				memcpy(res.fs_uuid, xdata, sizeof(apfs_uuid_t));
+ 				res.optional_present_flags |= Inode::INO_HAS_FS_UUID;
+ 				break;
+ 			case INO_EXT_TYPE_SPARSE_BYTES:
+-				assert(xf[n].x_size == sizeof(uint64_t));
+-				res.sparse_bytes = bswap_le(*reinterpret_cast<const uint64_t *>(xdata));
++				M4Apfs::Require(xf[n].x_size == sizeof(uint64_t), "INODE_XFIELD_SIZE");
++				res.sparse_bytes = bswap_le(M4Apfs::Load<uint64_t>(xdata));
+ 				res.optional_present_flags |= Inode::INO_HAS_SPARSE_BYTES;
+ 				break;
+ 			default:
+@@ -289,7 +296,9 @@
+ 				break;
+ 			}
+ 
+-			xdata += ((xf[n].x_size + 7) & ~7);
++            const size_t aligned = (uint32_t(xf[n].x_size) + 7) & ~7U;
++            M4Apfs::Require(aligned <= size_t(end - xdata), "INODE_XFIELD_ALIGNMENT");
++            xdata += aligned;
+ 		}
+ 	}
+ 
+@@ -389,7 +398,7 @@
+ 				{
+ 				case DREC_EXT_TYPE_SIBLING_ID:
+ 					assert(xf[n].x_size == sizeof(uint64_t));
+-					e.sibling_id = bswap_le(*reinterpret_cast<const uint64_t *>(xdata));
++					e.sibling_id = bswap_le(M4Apfs::Load<uint64_t>(xdata));
+ 					e.has_sibling_id = true;
+ 					break;
+ 				default:
+@@ -461,6 +470,7 @@
+ 		return false;
+ 	}
+ 
++    M4Apfs::Require(e.val && e.val_len >= sizeof(j_drec_val_t), "DIRECTORY_RECORD_SIZE");
+ 	const j_drec_val_t *v = reinterpret_cast<const j_drec_val_t *>(e.val);
+ 
+ 	res.file_id = v->file_id;
+@@ -490,8 +500,10 @@
+ 	paddr_t extent_paddr;
+ 	uint64_t extent_crypto_id;
+ 
++    M4Apfs::Require(size <= M4Apfs::MaxBytes && offs <= M4Apfs::MaxBytes - size, "FILE_READ_LIMIT");
+ 	while (size > 0)
+ 	{
++        M4Apfs::Step();
+ 		if (m_vol.isSealed()) {
+ 			fext_tree_key_t key;
+ 			const fext_tree_key_t *fext_key = nullptr;
+@@ -503,9 +515,12 @@
+ 			rc = m_vol.fexttree().Lookup(e, &key, sizeof(key), CompareFextKey, this, false);
+ 			if (!rc) return false;
+ 
++            M4Apfs::Require(e.key_len == sizeof(fext_tree_key_t) && e.val &&
++                            e.val_len >= sizeof(fext_tree_val_t), "FEXT_ENTRY_SIZE");
+ 			fext_key = reinterpret_cast<const fext_tree_key_t *>(e.key);
+ 			fext_val = reinterpret_cast<const fext_tree_val_t *>(e.val);
+ 
++            M4Apfs::Require(fext_key->private_id == inode && fext_key->logical_addr <= offs, "FEXT_ID_OR_OFFSET");
+ 			extent_offs = offs - fext_key->logical_addr;
+ 
+ 			extent_size = fext_val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+@@ -527,6 +542,8 @@
+ 			if (!rc)
+ 				return false;
+ 
++            M4Apfs::Require(e.key_len == sizeof(j_file_extent_key_t) && e.val &&
++                            e.val_len >= sizeof(j_file_extent_val_t), "EXTENT_ENTRY_SIZE");
+ 			ext_key = reinterpret_cast<const j_file_extent_key_t *>(e.key);
+ 			ext_val = reinterpret_cast<const j_file_extent_val_t *>(e.val);
+ 
+@@ -540,6 +557,7 @@
+ 				return false;
+ 
+ 			// Remove flags from length member
++            M4Apfs::Require(ext_key->logical_addr <= offs, "EXTENT_OFFSET");
+ 			extent_offs = offs - ext_key->logical_addr;
+ 
+ 			extent_size = ext_val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+@@ -547,16 +565,18 @@
+ 			extent_crypto_id = ext_val->crypto_id;
+ 		}
+ 
++        M4Apfs::Require(extent_offs < extent_size, "EXTENT_ZERO_PROGRESS");
++        M4Apfs::Require(!extent_crypto_id, "ENCRYPTED_FILE_EXTENT");
+ 		blk_idx = extent_offs >> m_blksize_sh;
++        M4Apfs::Require(extent_paddr >= 0 && uint64_t(extent_paddr) <= UINT64_MAX - blk_idx, "EXTENT_ADDRESS_OVERFLOW");
+ 		blk_offs = extent_offs & m_blksize_mask_lo;
+ 
+ 		cur_size = size;
+ 
+-		if ((extent_offs + cur_size) > extent_size)
++		if (cur_size > extent_size - extent_offs)
+ 			cur_size = extent_size - extent_offs;
+ 
+-		if (cur_size == 0)
+-			break;
++		M4Apfs::Require(cur_size != 0, "EXTENT_ZERO_PROGRESS");
+ 
+ 		if (extent_paddr != 0)
+ 		{
+@@ -567,14 +587,14 @@
+ 			{
+ 				if (g_debug & Dbg_Dir)
+ 					std::cout << "Full read blk " << extent_paddr + blk_idx << " cnt " << (cur_size >> m_blksize_sh) << std::endl;
+-				m_vol.ReadBlocks(bdata, extent_paddr + blk_idx, cur_size >> m_blksize_sh, extent_crypto_id + blk_idx);
++				if (!m_vol.ReadBlocks(bdata, extent_paddr + blk_idx, cur_size >> m_blksize_sh, 0)) return false;
+ 			}
+ 			else
+ 			{
+ 				if (g_debug & Dbg_Dir)
+ 					std::cout << "Partial read blk " << extent_paddr + blk_idx << " cnt 1" << std::endl;
+ 
+-				m_vol.ReadBlocks(m_tmp_blk.data(), extent_paddr + blk_idx, 1, extent_crypto_id + blk_idx);
++				if (!m_vol.ReadBlocks(m_tmp_blk.data(), extent_paddr + blk_idx, 1, 0)) return false;
+ 
+ 				if (blk_offs + cur_size > m_blksize)
+ 					cur_size = m_blksize - blk_offs;
+@@ -661,7 +681,9 @@
+ 	if (!rc)
+ 		return false;
+ 
++    M4Apfs::Require(res.val && res.val_len >= sizeof(j_xattr_val_t), "XATTR_HEADER_SIZE");
+ 	attr = reinterpret_cast<const j_xattr_val_t *>(res.val);
++    M4Apfs::Require(attr->xdata_len <= res.val_len - sizeof(j_xattr_val_t), "XATTR_VALUE_SIZE");
+ 	// adata = reinterpret_cast<const uint8_t *>(res.val) + sizeof(APFS_Xattr_Val);
+ 
+ 	if (g_debug & Dbg_Dir)
+@@ -670,7 +692,7 @@
+ 	if (attr->flags & XATTR_DATA_STREAM)
+ 	{
+ 		// Attribute contents are stored in a file
+-		assert(attr->xdata_len == sizeof(j_xattr_dstream_t));
++        M4Apfs::Require(attr->xdata_len == sizeof(j_xattr_dstream_t), "XATTR_STREAM_SIZE");
+ 		xstm = reinterpret_cast<const j_xattr_dstream_t *>(attr->xdata);
+ 
+ 		if (g_debug & Dbg_Dir)
+@@ -684,9 +706,11 @@
+ 			std::cout << "  total_bytes_read  : " << xstm->dstream.total_bytes_read << std::endl;
+ 		}
+ 
+-		data.resize(xstm->dstream.alloced_size);
+-		ReadFile(data.data(), xstm->xattr_obj_id, 0, data.size()); // Read must be multiple of 4K ...
+-		data.resize(xstm->dstream.size);
++        M4Apfs::Require(xstm->dstream.size <= M4Apfs::MaxBytes &&
++                        xstm->dstream.alloced_size <= M4Apfs::MaxBytes, "XATTR_SIZE_LIMIT");
++        M4Apfs::Require(!xstm->dstream.default_crypto_id, "ENCRYPTED_XATTR");
++        data.resize(xstm->dstream.size);
++        if (!ReadFile(data.data(), xstm->xattr_obj_id, 0, data.size())) return false;
+ 
+ 		if (g_debug & Dbg_Dir)
+ 		{
+@@ -701,6 +725,7 @@
+ 		// Attribute contents are stored in the btree
+ 		data.assign(attr->xdata, attr->xdata + attr->xdata_len);
+ 	}
++    else throw std::runtime_error("XATTR_STORAGE_FLAGS");
+ 
+ 	return true;
+ }
+@@ -747,10 +772,11 @@
+ 
+ 	(void)ekey_len;
+ 
++    M4Apfs::Require(skey_len >= 8 && ekey_len >= 8, "FILESYSTEM_KEY_SIZE");
+ 	ApfsDir *dir = reinterpret_cast<ApfsDir *>(context);
+ 
+-	uint64_t ks = *reinterpret_cast<const le_uint64_t *>(skey);
+-	uint64_t ke = *reinterpret_cast<const le_uint64_t *>(ekey);
++	uint64_t ks = M4Apfs::Load<le_uint64_t>(skey);
++	uint64_t ke = M4Apfs::Load<le_uint64_t>(ekey);
+ 
+ 	// std::cout << std::hex << std::uppercase << std::setfill('0');
+ 
+@@ -774,6 +800,9 @@
+ 				const j_drec_hashed_key_t *s = reinterpret_cast<const j_drec_hashed_key_t *>(skey);
+ 				const j_drec_hashed_key_t *e = reinterpret_cast<const j_drec_hashed_key_t *>(ekey);
+ 
++                M4Apfs::Require(skey_len >= sizeof(*s) && ekey_len >= sizeof(*e) &&
++                    (s->name_len_and_hash & J_DREC_LEN_MASK) <= skey_len - sizeof(*s) &&
++                    (e->name_len_and_hash & J_DREC_LEN_MASK) <= ekey_len - sizeof(*e), "DIRECTORY_KEY_SIZE");
+ 				/* TODO: Is this correct? Yes. TODO check _apfs_cstrncmp. */
+ 				if ((e->name_len_and_hash & J_DREC_HASH_MASK) < (s->name_len_and_hash & J_DREC_HASH_MASK))
+ 					return -1;
+@@ -787,7 +816,9 @@
+ 				const j_drec_key_t *s = reinterpret_cast<const j_drec_key_t *>(skey);
+ 				const j_drec_key_t *e = reinterpret_cast<const j_drec_key_t *>(ekey);
+ 
+-				return apfs_strncmp(e->name, e->name_len, s->name, s->name_len);
++                M4Apfs::Require(skey_len >= sizeof(*s) && ekey_len >= sizeof(*e) &&
++                    s->name_len <= skey_len - sizeof(*s) && e->name_len <= ekey_len - sizeof(*e), "DIRECTORY_KEY_SIZE");
++			return apfs_strncmp(e->name, e->name_len, s->name, s->name_len);
+ 			}
+ 			break;
+ 		case APFS_TYPE_FILE_EXTENT:
+@@ -795,8 +826,8 @@
+ 			const j_file_extent_key_t *s = reinterpret_cast<const j_file_extent_key_t *>(skey);
+ 			const j_file_extent_key_t *e = reinterpret_cast<const j_file_extent_key_t *>(ekey);
+ 
+-			assert(skey_len == sizeof(j_file_extent_key_t));
+-			assert(ekey_len == sizeof(j_file_extent_key_t));
++            M4Apfs::Require(skey_len == sizeof(j_file_extent_key_t) &&
++                            ekey_len == sizeof(j_file_extent_key_t), "EXTENT_KEY_SIZE");
+ 
+ 			if (e->logical_addr < s->logical_addr)
+ 				return -1;
+@@ -809,6 +840,8 @@
+ 			const j_xattr_key_t *s = reinterpret_cast<const j_xattr_key_t *>(skey);
+ 			const j_xattr_key_t *e = reinterpret_cast<const j_xattr_key_t *>(ekey);
+ 
++            M4Apfs::Require(skey_len >= sizeof(*s) && ekey_len >= sizeof(*e) &&
++                s->name_len <= skey_len - sizeof(*s) && e->name_len <= ekey_len - sizeof(*e), "XATTR_KEY_SIZE");
+ 			return apfs_strncmp(e->name, e->name_len, s->name, s->name_len);
+ 		}
+ 			break;
+@@ -832,6 +865,8 @@
+ 
+ int ApfsDir::CompareFextKey(const void* skey, size_t skey_len, const void* ekey, size_t ekey_len, void* context)
+ {
++    M4Apfs::Require(skey_len == sizeof(fext_tree_key_t) && ekey_len == sizeof(fext_tree_key_t), "FEXT_KEY_SIZE");
++    (void)context;
+ 	const fext_tree_key_t *s = reinterpret_cast<const fext_tree_key_t *>(skey);
+ 	const fext_tree_key_t *e = reinterpret_cast<const fext_tree_key_t *>(ekey);
+ 
+--- a/ApfsLib/ApfsNodeMapperBTree.cpp
++++ b/ApfsLib/ApfsNodeMapperBTree.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include "ApfsNodeMapperBTree.h"
+ #include "ApfsContainer.h"
++#include "ReaderLimits.h"
+ 
+ static int CompareOMapKey(const void *skey, size_t skey_len, const void *ekey, size_t ekey_len, void *context)
+ {
+@@ -30,8 +31,7 @@
+ 	(void)skey_len;
+ 	(void)ekey_len;
+ 
+-	assert(skey_len == sizeof(omap_key_t));
+-	assert(ekey_len == sizeof(omap_val_t));
++    M4Apfs::Require(skey_len == sizeof(omap_key_t) && ekey_len == sizeof(omap_key_t), "OMAP_KEY_SIZE");
+ 
+ 	const omap_key_t *skey_map = reinterpret_cast<const omap_key_t *>(skey);
+ 	const omap_key_t *ekey_map = reinterpret_cast<const omap_key_t *>(ekey);
+@@ -71,7 +71,7 @@
+ 
+ 	memcpy(&m_omap, blk.data(), sizeof(omap_phys_t));
+ 
+-	if ((m_omap.om_o.o_type & OBJECT_TYPE_MASK) == OBJECT_TYPE_BTREE)
++	if ((m_omap.om_o.o_type & OBJECT_TYPE_MASK) != OBJECT_TYPE_OMAP)
+ 	{
+ 		std::cerr << "ERROR: Wrong omap type 0x" << std::hex << m_omap.om_o.o_type << std::endl;
+ 		return false;
+@@ -101,7 +101,8 @@
+ 		return false;
+ 	}
+ 
+-	assert(res.val_len == sizeof(omap_val_t));
++    M4Apfs::Require(res.key_len == sizeof(omap_key_t) && res.val &&
++                    res.val_len == sizeof(omap_val_t), "OMAP_ENTRY_SIZE");
+ 
+ 	res_key = reinterpret_cast<const omap_key_t *>(res.key);
+ 	res_val = reinterpret_cast<const omap_val_t *>(res.val);
+@@ -125,7 +126,10 @@
+ 		return false;
+ 	}
+ 
+-	// std::cout << val->blockid << std::endl;
++    M4Apfs::Require(res_key->ok_xid <= xid, "OMAP_FUTURE_XID");
++    M4Apfs::Require(!(res_val->ov_flags & OMAP_VAL_ENCRYPTED), "ENCRYPTED_METADATA");
++    M4Apfs::Require(!(res_val->ov_flags & OMAP_VAL_DELETED), "OMAP_DELETED");
++    M4Apfs::Require(res_val->ov_size == m_container.GetBlocksize(), "OMAP_OBJECT_SIZE");
+ 
+ 	omr.oid = res_key->ok_oid;
+ 	omr.xid = res_key->ok_xid;
+--- a/ApfsLib/ApfsVolume.cpp
++++ b/ApfsLib/ApfsVolume.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "ApfsContainer.h"
+ #include "ApfsVolume.h"
++#include "ReaderLimits.h"
+ #include "BlockDumper.h"
+ #include "Util.h"
+ 
+@@ -60,53 +61,28 @@
+ 
+ 	memcpy(&m_sb, blk.data(), sizeof(m_sb));
+ 
+-	if (m_sb.apfs_magic != APFS_MAGIC)
+-		return false;
++    M4Apfs::Require(m_sb.apfs_magic == APFS_MAGIC &&
++                    (m_sb.apfs_o.o_type & OBJECT_TYPE_MASK) == OBJECT_TYPE_FS, "VOLUME_SUPERBLOCK_TYPE");
++    M4Apfs::Require((m_sb.apfs_fs_flags & 3) == APFS_FS_UNENCRYPTED, "ENCRYPTED_VOLUME");
++    M4Apfs::Require(!(m_sb.apfs_incompatible_features & ~APFS_SUPPORTED_INCOMPAT_MASK) &&
++                    !(m_sb.apfs_incompatible_features & APFS_INCOMPAT_RESERVED_40), "VOLUME_UNKNOWN_INCOMPAT");
++    M4Apfs::Require(!(m_sb.apfs_incompatible_features &
++                    (APFS_INCOMPAT_ENC_ROLLED | APFS_INCOMPAT_INCOMPLETE_RESTORE)), "VOLUME_INCOMPAT_REFUSED");
+ 
+ 	if (!m_omap.Init(m_sb.apfs_omap_oid, m_sb.apfs_o.o_xid)) {
+ 		std::cerr << "WARNING: Volume omap tree init failed." << std::endl;
+ 		return false;
+ 	}
+ 
+-	if ((m_sb.apfs_fs_flags & 3) != APFS_FS_UNENCRYPTED && !m_container.IsUnencrypted())
+-	{
+-		uint8_t vek[0x20];
+-		std::string str;
+-
+-		std::cout << "Volume " << m_sb.apfs_volname << " is encrypted." << std::endl;
+-
+-		if (!m_container.GetVolumeKey(vek, m_sb.apfs_vol_uuid))
+-		{
+-			if (m_container.GetPasswordHint(str, m_sb.apfs_vol_uuid))
+-				std::cout << "Hint: " << str << std::endl;
+-
+-			std::cout << "Enter Password: ";
+-			GetPassword(str);
+-
+-			if (!m_container.GetVolumeKey(vek, m_sb.apfs_vol_uuid, str.c_str()))
+-			{
+-				std::cout << "Wrong password!" << std::endl;
+-				return false;
+-			}
+-		}
+-
+-		m_aes.SetKey(vek, vek + 0x10);
+-		m_is_encrypted = true;
+-	}
+-
+-	if (!m_fs_tree.Init(m_sb.apfs_root_tree_oid, m_sb.apfs_o.o_xid, &m_omap))
+-		std::cerr << "ERROR: root tree init failed" << std::endl;
+-
+-	if (!m_extentref_tree.Init(m_sb.apfs_extentref_tree_oid, m_sb.apfs_o.o_xid))
+-		std::cerr << "WARNING: extentref tree init failed" << std::endl;
+-
+-	if (!m_snap_meta_tree.Init(m_sb.apfs_snap_meta_tree_oid, m_sb.apfs_o.o_xid))
+-		std::cerr << "WARNING: snap meta tree init failed" << std::endl;
++	M4Apfs::Require((m_sb.apfs_fs_flags & 3) == APFS_FS_UNENCRYPTED, "ENCRYPTED_VOLUME");
++
++    M4Apfs::Require(m_fs_tree.Init(m_sb.apfs_root_tree_oid, m_sb.apfs_o.o_xid, &m_omap), "FILESYSTEM_TREE_INIT");
++
++	// The camera reader does not need extentref or a second snapshot-tree view.
+ 
+ 	if (m_sb.apfs_incompatible_features & APFS_INCOMPAT_SEALED_VOLUME)
+ 	{
+-		if (!m_fext_tree.Init(m_sb.apfs_fext_tree_oid, m_sb.apfs_o.o_xid))
+-			std::cerr << "ERROR: fext tree init failed" << std::endl;
++        M4Apfs::Require(m_fext_tree.Init(m_sb.apfs_fext_tree_oid, m_sb.apfs_o.o_xid), "SEALED_FEXT_TREE_INIT");
+ 	}
+ 
+ 	return true;
+@@ -132,8 +108,13 @@
+ 
+ 	memcpy(&m_sb, blk.data(), sizeof(m_sb));
+ 
+-	if (m_sb.apfs_magic != APFS_MAGIC)
+-		return false;
++    M4Apfs::Require(m_sb.apfs_magic == APFS_MAGIC &&
++                    (m_sb.apfs_o.o_type & OBJECT_TYPE_MASK) == OBJECT_TYPE_FS, "VOLUME_SUPERBLOCK_TYPE");
++    M4Apfs::Require((m_sb.apfs_fs_flags & 3) == APFS_FS_UNENCRYPTED, "ENCRYPTED_VOLUME");
++    M4Apfs::Require(!(m_sb.apfs_incompatible_features & ~APFS_SUPPORTED_INCOMPAT_MASK) &&
++                    !(m_sb.apfs_incompatible_features & APFS_INCOMPAT_RESERVED_40), "VOLUME_UNKNOWN_INCOMPAT");
++    M4Apfs::Require(!(m_sb.apfs_incompatible_features &
++                    (APFS_INCOMPAT_ENC_ROLLED | APFS_INCOMPAT_INCOMPLETE_RESTORE)), "VOLUME_INCOMPAT_REFUSED");
+ 
+ 	if (m_sb.apfs_snap_meta_tree_oid == 0)
+ 		return false;
+@@ -149,7 +130,9 @@
+ 		return false;
+ 	}
+ 
++    M4Apfs::Require(snap_entry.val && snap_entry.val_len >= sizeof(j_snap_metadata_val_t), "SNAPSHOT_METADATA_SIZE");
+ 	snap_val = reinterpret_cast<const j_snap_metadata_val_t *>(snap_entry.val);
++    M4Apfs::Require(!(snap_val->flags & (SNAP_META_PENDING_DATALESS | SNAP_META_MERGE_IN_PROGRESS)), "SNAPSHOT_INCOMPLETE");
+ 
+ 	if (!m_omap.Init(m_sb.apfs_omap_oid, m_sb.apfs_o.o_xid)) {
+ 		std::cerr << "WARNING: Volume omap tree init failed." << std::endl;
+@@ -167,48 +150,24 @@
+ 
+ 	memcpy(&m_sb, blk.data(), sizeof(m_sb));
+ 
+-	if (m_sb.apfs_magic != APFS_MAGIC)
+-		return false;
+-
+-	if ((m_sb.apfs_fs_flags & 3) != APFS_FS_UNENCRYPTED)
+-	{
+-		uint8_t vek[0x20];
+-		std::string str;
+-
+-		std::cout << "Volume " << m_sb.apfs_volname << " is encrypted." << std::endl;
+-
+-		if (!m_container.GetVolumeKey(vek, m_sb.apfs_vol_uuid))
+-		{
+-			if (m_container.GetPasswordHint(str, m_sb.apfs_vol_uuid))
+-				std::cout << "Hint: " << str << std::endl;
+-
+-			std::cout << "Enter Password: ";
+-			GetPassword(str);
+-
+-			if (!m_container.GetVolumeKey(vek, m_sb.apfs_vol_uuid, str.c_str()))
+-			{
+-				std::cout << "Wrong password!" << std::endl;
+-				return false;
+-			}
+-		}
+-
+-		m_aes.SetKey(vek, vek + 0x10);
+-		m_is_encrypted = true;
+-	}
+-
+-	if (!m_fs_tree.Init(m_sb.apfs_root_tree_oid, m_sb.apfs_o.o_xid, &m_omap))
+-		std::cerr << "WARNING: root tree init failed" << std::endl;
+-
+-	if (!m_extentref_tree.Init(m_sb.apfs_extentref_tree_oid, m_sb.apfs_o.o_xid))
+-		std::cerr << "WARNING: extentref tree init failed" << std::endl;
+-
+-	if (!m_snap_meta_tree.Init(m_sb.apfs_snap_meta_tree_oid, m_sb.apfs_o.o_xid))
+-		std::cerr << "WARNING: snap meta tree init failed" << std::endl;
++    M4Apfs::Require(m_sb.apfs_magic == APFS_MAGIC &&
++                    (m_sb.apfs_o.o_type & OBJECT_TYPE_MASK) == OBJECT_TYPE_FS, "VOLUME_SUPERBLOCK_TYPE");
++    M4Apfs::Require((m_sb.apfs_fs_flags & 3) == APFS_FS_UNENCRYPTED, "ENCRYPTED_VOLUME");
++    M4Apfs::Require(!(m_sb.apfs_incompatible_features & ~APFS_SUPPORTED_INCOMPAT_MASK) &&
++                    !(m_sb.apfs_incompatible_features & APFS_INCOMPAT_RESERVED_40), "VOLUME_UNKNOWN_INCOMPAT");
++    M4Apfs::Require(!(m_sb.apfs_incompatible_features &
++                    (APFS_INCOMPAT_ENC_ROLLED | APFS_INCOMPAT_INCOMPLETE_RESTORE)), "VOLUME_INCOMPAT_REFUSED");
++
++	M4Apfs::Require((m_sb.apfs_fs_flags & 3) == APFS_FS_UNENCRYPTED, "ENCRYPTED_VOLUME");
++
++    M4Apfs::Require(m_sb.apfs_o.o_xid == snap_xid, "SNAPSHOT_XID_MISMATCH");
++    M4Apfs::Require(m_fs_tree.Init(m_sb.apfs_root_tree_oid, snap_xid, &m_omap), "SNAPSHOT_FILESYSTEM_TREE_INIT");
++
++	// The camera reader does not need extentref or a second snapshot-tree view.
+ 
+ 	if (m_sb.apfs_incompatible_features & APFS_INCOMPAT_SEALED_VOLUME)
+ 	{
+-		if (!m_fext_tree.Init(m_sb.apfs_fext_tree_oid, m_sb.apfs_o.o_xid))
+-			std::cerr << "ERROR: fext tree init failed" << std::endl;
++        M4Apfs::Require(m_fext_tree.Init(m_sb.apfs_fext_tree_oid, m_sb.apfs_o.o_xid), "SEALED_FEXT_TREE_INIT");
+ 	}
+ 
+ 	return true;
+@@ -343,32 +302,15 @@
+ #endif
+ }
+ 
+-bool ApfsVolume::ReadBlocks(uint8_t * data, paddr_t paddr, uint64_t blkcnt, uint64_t xts_tweak)
+-{
+-	constexpr int encryption_block_size = 0x200;
+-
+-	if (!m_container.ReadBlocks(data, paddr, blkcnt))
+-		return false;
+-
+-	if (!m_is_encrypted || (xts_tweak == 0))
+-		return true;
+-
+-	uint64_t cs_factor = m_container.GetBlocksize() / encryption_block_size;
+-	uint64_t uno = xts_tweak * cs_factor;
+-	size_t size = blkcnt * m_container.GetBlocksize();
+-	size_t k;
+-
+-	for (k = 0; k < size; k += encryption_block_size)
+-	{
+-		m_aes.Decrypt(data + k, data + k, encryption_block_size, uno);
+-		uno++;
+-	}
+-
+-	return true;
++bool ApfsVolume::ReadBlocks(uint8_t *data, paddr_t paddr, uint64_t blkcnt, uint64_t xts_tweak)
++{
++    M4Apfs::Require(!m_is_encrypted && !xts_tweak, "ENCRYPTED_METADATA_OR_EXTENT");
++    return m_container.ReadBlocks(data, paddr, blkcnt);
+ }
+ 
+ int ApfsVolume::CompareSnapMetaKey(const void* skey, size_t skey_len, const void* ekey, size_t ekey_len, void* context)
+ {
++    M4Apfs::Require(skey_len >= sizeof(j_key_t) && ekey_len >= sizeof(j_key_t), "SNAPSHOT_KEY_SIZE");
+ 	const j_key_t *ks = reinterpret_cast<const j_key_t*>(skey);
+ 	const j_key_t *ke = reinterpret_cast<const j_key_t*>(ekey);
+ 	const j_snap_name_key_t *sks;
+--- a/ApfsLib/BTree.cpp
++++ b/ApfsLib/BTree.cpp
+@@ -29,6 +29,7 @@
+ #include "ApfsVolume.h"
+ #include "BTree.h"
+ #include "Util.h"
++#include "ReaderLimits.h"
+ #include "BlockDumper.h"
+ 
+ int CompareStdKey(const void *skey, size_t skey_len, const void *ekey, size_t ekey_len, void *context)
+@@ -40,8 +41,8 @@
+ 	(void)ekey_len;
+ 	(void)context;
+ 
+-	uint64_t ks = *reinterpret_cast<const uint64_t *>(skey);
+-	uint64_t ke = *reinterpret_cast<const uint64_t *>(ekey);
++	uint64_t ks = M4Apfs::Load<uint64_t>(skey);
++	uint64_t ke = M4Apfs::Load<uint64_t>(ekey);
+ 
+ 	if (ke < ks)
+ 		return -1;
+@@ -94,6 +95,40 @@
+ {
+ 	const btree_node_phys_t *btn = reinterpret_cast<const btree_node_phys_t *>(block);
+ 
++
++    using M4Apfs::Require;
++    Require(blocksize >= sizeof(btree_node_phys_t) + sizeof(btree_info_t), "BTREE_BLOCK_SIZE");
++    Require(btn->btn_level <= M4Apfs::MaxDepth, "BTREE_DEPTH_LIMIT");
++    Require(btn->btn_table_space.off == 0, "BTREE_TABLE_OFFSET_UNSUPPORTED");
++    Require(bool(btn->btn_flags & BTNODE_LEAF) == (btn->btn_level == 0), "BTREE_LEVEL_FLAGS");
++    if (parent) {
++        Require(!(btn->btn_flags & BTNODE_ROOT), "BTREE_CHILD_ROOT_FLAG");
++        Require(parent->level() == btn->btn_level + 1, "BTREE_LEVEL_OR_CYCLE");
++    } else Require(btn->btn_flags & BTNODE_ROOT, "BTREE_ROOT_FLAG");
++    const size_t values_end = blocksize - ((btn->btn_flags & BTNODE_ROOT) ? sizeof(btree_info_t) : 0);
++    const size_t table = sizeof(btree_node_phys_t);
++    Require(btn->btn_table_space.len <= values_end - table, "BTREE_TABLE_SIZE");
++    const size_t keys = table + btn->btn_table_space.len;
++    const size_t entry_size = (btn->btn_flags & BTNODE_FIXED_KV_SIZE) ? sizeof(kvoff_t) : sizeof(kvloc_t);
++    Require(btn->btn_nkeys <= btn->btn_table_space.len / entry_size, "BTREE_ENTRY_COUNT");
++    const auto *root_info = reinterpret_cast<const btree_info_t *>(block + values_end);
++    const size_t fixed_key = (btn->btn_flags & BTNODE_ROOT) ? root_info->bt_fixed.bt_key_size : tree.GetKeyLen();
++    const size_t fixed_val = (btn->btn_flags & BTNODE_ROOT) ? root_info->bt_fixed.bt_val_size : tree.GetValLen();
++    for (uint32_t i = 0; i < btn->btn_nkeys; ++i) {
++        size_t ko, kl, vo, vl;
++        if (btn->btn_flags & BTNODE_FIXED_KV_SIZE) {
++            const auto *kv = reinterpret_cast<const kvoff_t *>(block + table) + i;
++            ko = kv->k; kl = fixed_key; vo = kv->v;
++            vl = (btn->btn_flags & BTNODE_LEAF) ? fixed_val : sizeof(oid_t);
++        } else {
++            const auto *kv = reinterpret_cast<const kvloc_t *>(block + table) + i;
++            ko = kv->k.off; kl = kv->k.len; vo = kv->v.off; vl = kv->v.len;
++        }
++        Require(kl >= 8 && ko <= values_end - keys && kl <= values_end - keys - ko, "BTREE_KEY_RANGE");
++        Require(vo == BTOFF_INVALID || (vo <= values_end - keys && vl <= vo), "BTREE_VALUE_RANGE");
++        if (btn->btn_level) Require(vo != BTOFF_INVALID && vl >= sizeof(oid_t), "BTREE_CHILD_POINTER");
++    }
++
+ 	if (btn->btn_flags & BTNODE_FIXED_KV_SIZE)
+ 		return std::make_shared<BTreeNodeFix>(tree, block, blocksize, paddr, parent, parent_index);
+ 	else
+@@ -170,6 +205,7 @@
+ 	m_volume = volume;
+ 
+ 	m_root_node = nullptr;
++	memset(&m_treeinfo, 0, sizeof(m_treeinfo));
+ 	m_omap = nullptr;
+ 	m_xid = 0;
+ 	m_debug = false;
+@@ -216,11 +252,12 @@
+ 	int index;
+ 
+ 	std::shared_ptr<BTreeNode> node(m_root_node);
++	if (!node) return false;
+ 	BTreeEntry e;
+ 
+ 	if (m_debug)
+ 	{
+-		// std::cout << std::hex << "BTree::Lookup: key=" << *reinterpret_cast<const uint64_t *>(key) << " root=" << node->nodeid() << std::endl;
++		// std::cout << std::hex << "BTree::Lookup: key=" << M4Apfs::Load<uint64_t>(key) << " root=" << node->nodeid() << std::endl;
+ 		std::cout << "BTree::Lookup: ";
+ 		DumpHex(std::cout, reinterpret_cast<const uint8_t *>(key), key_size, key_size);
+ 	}
+@@ -232,7 +269,7 @@
+ 		if (index < 0)
+ 			return false;
+ 
+-		node->GetEntry(e, index);
++		if (!node->GetEntry(e, index)) return false;
+ 		// DumpHex(std::cout, reinterpret_cast<const uint8_t*>(e.val), e.val_len, 32);
+ 
+ 		oid_parent = node->nodeid();
+@@ -242,10 +279,11 @@
+ 			oid = binv->binv_child_oid + m_oid;
+ 		} else {
+ 			assert(e.val_len == sizeof(oid_t));
+-			oid = *reinterpret_cast<const oid_t *>(e.val);
++			oid = M4Apfs::Load<oid_t>(e.val);
+ 		}
+ 
+ 		node = GetNode(oid, node, index);
++		if (!node) return false;
+ 
+ 		if (!node)
+ 		{
+@@ -274,10 +312,11 @@
+ 	int index;
+ 
+ 	std::shared_ptr<BTreeNode> node(m_root_node);
++	if (!node) return false;
+ 	BTreeEntry e;
+ 
+ 	if (m_debug)
+-		std::cout << std::hex << "BTree::GetIterator: key=" << *reinterpret_cast<const uint64_t *>(key) << " root=" << node->nodeid() << std::endl;
++		std::cout << std::hex << "BTree::GetIterator: key=" << M4Apfs::Load<uint64_t>(key) << " root=" << node->nodeid() << std::endl;
+ 
+ 	while (node->level() > 0)
+ 	{
+@@ -286,17 +325,18 @@
+ 		if (index < 0)
+ 			index = 0;
+ 
+-		node->GetEntry(e, index);
++		if (!node->GetEntry(e, index)) return false;
+ 
+ 		if (node->flags() & BTNODE_HASHED) {
+ 			const btn_index_node_val_t *binv = reinterpret_cast<const btn_index_node_val_t*>(e.val);
+ 			oid = binv->binv_child_oid + m_oid;
+ 		} else {
+ 			assert(e.val_len == sizeof(oid_t));
+-			oid = *reinterpret_cast<const oid_t *>(e.val);
++			oid = M4Apfs::Load<oid_t>(e.val);
+ 		}
+ 
+ 		node = GetNode(oid, node, index);
++		if (!node) return false;
+ 	}
+ 
+ 	index = FindBin(node, key, key_size, func, context, FindMode::GE);
+@@ -332,6 +372,7 @@
+ 	oid_t oid;
+ 
+ 	std::shared_ptr<BTreeNode> node(m_root_node);
++	if (!node) return false;
+ 	BTreeEntry e;
+ 
+ 	while (node->level() > 0)
+@@ -343,9 +384,10 @@
+ 			const btn_index_node_val_t *binv = reinterpret_cast<const btn_index_node_val_t*>(e.val);
+ 			oid = binv->binv_child_oid + m_oid;
+ 		} else {
+-			oid = *reinterpret_cast<const oid_t *>(e.val);
++			oid = M4Apfs::Load<oid_t>(e.val);
+ 		}
+ 		node = GetNode(oid, node, 0);
++		if (!node) return false;
+ 	}
+ 
+ 	it.Setup(this, node, 0);
+@@ -392,7 +434,7 @@
+ 				const btn_index_node_val_t *binv = reinterpret_cast<const btn_index_node_val_t *>(e.val);
+ 				oid_child = binv->binv_child_oid + m_oid;
+ 			} else {
+-				oid_child = *reinterpret_cast<const uint64_t *>(e.val);
++				oid_child = M4Apfs::Load<uint64_t>(e.val);
+ 			}
+ 
+ 			if (m_omap) {
+@@ -418,6 +460,7 @@
+ 
+ std::shared_ptr<BTreeNode> BTree::GetNode(oid_t oid, const std::shared_ptr<BTreeNode> &parent, uint32_t parent_index)
+ {
++    M4Apfs::Step();
+ 	std::shared_ptr<BTreeNode> node;
+ 	bool rc;
+ 
+@@ -502,6 +545,8 @@
+ 			}
+ 		}
+ 
++        M4Apfs::Require(!(omr.flags & OMAP_VAL_ENCRYPTED), "ENCRYPTED_METADATA");
++        M4Apfs::Require(!(omr.flags & OMAP_VAL_DELETED), "OMAP_DELETED");
+ 		node = BTreeNode::CreateNode(*this, blk.data(), blk.size(), omr.paddr, parent, parent_index);
+ #ifdef BTREE_USE_MAP
+ 		m_mutex.lock();
+@@ -528,6 +573,7 @@
+ #endif
+ 	}
+ 
++    if (node && parent) M4Apfs::Require(parent->level() == node->level() + 1, "BTREE_LEVEL_OR_CYCLE");
+ 	return node;
+ }
+ 
+@@ -735,13 +781,13 @@
+ 		return std::shared_ptr<BTreeNode>();
+ 
+ 	while (node->level() > 0) {
+-		node->GetEntry(e, pidx);
++		if (!node->GetEntry(e, pidx)) throw std::runtime_error("BTREE_ITERATOR_ENTRY");
+ 
+ 		if (node->flags() & BTNODE_HASHED) {
+ 			const btn_index_node_val_t *binv = reinterpret_cast<const btn_index_node_val_t *>(e.val);
+ 			oid = binv->binv_child_oid + m_tree->m_oid;
+ 		} else {
+-			oid = *reinterpret_cast<const uint64_t *>(e.val);
++			oid = M4Apfs::Load<uint64_t>(e.val);
+ 		}
+ 
+ #ifdef BTITDBG
+@@ -749,8 +795,7 @@
+ #endif
+ 		node = m_tree->GetNode(oid, node, pidx);
+ 
+-		if (!node)
+-			std::cerr << "Failed to load btree node oid " << oid << std::endl;
++		M4Apfs::Require(bool(node), "BTREE_ITERATOR_NODE");
+ 
+ 		pidx = 0;
+ 	}
+--- a/ApfsLib/CheckPointMap.cpp
++++ b/ApfsLib/CheckPointMap.cpp
+@@ -1,4 +1,5 @@
+ #include <cassert>
++#include "ReaderLimits.h"
+ 
+ #include "ApfsContainer.h"
+ #include "DiskStruct.h"
+@@ -20,12 +21,19 @@
+ 	uint32_t n;
+ 	const checkpoint_map_phys_t *cpm;
+ 
++    M4Apfs::Require(blk_count > 0 && blk_count <= M4Apfs::MaxCheckpoints, "CHECKPOINT_MAP_LIMIT");
++    const auto &nx = m_container.Superblock();
++    M4Apfs::Require(root_oid >= uint64_t(nx.nx_xp_desc_base) &&
++                    root_oid - uint64_t(nx.nx_xp_desc_base) < nx.nx_xp_desc_blocks,
++                    "CHECKPOINT_MAP_RANGE");
+ 	m_blksize = m_container.GetBlocksize();
++    M4Apfs::Require(uint64_t(blk_count) * m_blksize <= M4Apfs::MaxBytes, "CHECKPOINT_MAP_ALLOCATION");
+ 	m_cpm_data.resize(m_blksize * blk_count);
+ 
+ 	for (n = 0; n < blk_count; n++)
+ 	{
+-		if (!m_container.ReadAndVerifyHeaderBlock(m_cpm_data.data() + n * m_blksize, root_oid + n))
++		if (!m_container.ReadAndVerifyHeaderBlock(m_cpm_data.data() + n * m_blksize, uint64_t(nx.nx_xp_desc_base) +
++            ((root_oid - uint64_t(nx.nx_xp_desc_base) + n) % nx.nx_xp_desc_blocks)))
+ 		{
+ 			m_cpm_data.clear();
+ 			return false;
+@@ -33,7 +41,9 @@
+ 
+ 		cpm = reinterpret_cast<const checkpoint_map_phys_t *>(m_cpm_data.data() + m_blksize * n);
+ 
+-		assert((cpm->cpm_o.o_type & OBJECT_TYPE_MASK) == OBJECT_TYPE_CHECKPOINT_MAP);
++        M4Apfs::Require(cpm->cpm_o.o_xid == nx.nx_o.o_xid, "CHECKPOINT_MAP_XID");
++        M4Apfs::Require(cpm->cpm_count <= (m_blksize - sizeof(checkpoint_map_phys_t)) /
++                        sizeof(checkpoint_mapping_t), "CHECKPOINT_MAP_COUNT");
+ 
+ 		if ((cpm->cpm_o.o_type & OBJECT_TYPE_MASK) != OBJECT_TYPE_CHECKPOINT_MAP)
+ 		{
+--- a/ApfsLib/Decmpfs.cpp
++++ b/ApfsLib/Decmpfs.cpp
+@@ -23,6 +23,7 @@
+ #include <cassert>
+ 
+ #include "Decmpfs.h"
++#include "ReaderLimits.h"
+ #include "Endian.h"
+ 
+ #include "Global.h"
+@@ -85,257 +86,81 @@
+ 	}
+ }
+ 
+-bool DecompressFile(ApfsDir &dir, uint64_t ino, std::vector<uint8_t> &decompressed, const std::vector<uint8_t> &compressed)
++// Validate the complete input tables before allocation or decoding.
++bool DecompressFile(ApfsDir &dir, uint64_t ino, std::vector<uint8_t> &out, const std::vector<uint8_t> &input)
+ {
+-	if (compressed.size() < sizeof(CompressionHeader))
+-		return false;
+-
+-	const CompressionHeader *hdr = reinterpret_cast<const CompressionHeader *>(compressed.data());
+-	const uint8_t *cdata = compressed.data() + sizeof(CompressionHeader);
+-	size_t csize = compressed.size() - sizeof(CompressionHeader);
+-	size_t decoded_bytes = 0;
+-
+-#if 1 // Disable to get compressed data
+-	if (g_debug & Dbg_Cmpfs)
+-	{
+-		std::cout << "DecompressFile " << compressed.size() << " => " << hdr->size << ", algo = " << hdr->algo;
+-
+-		switch (hdr->algo)
+-		{
+-		case 3: std::cout << " (Zlib, Attr)"; break;
+-		case 4: std::cout << " (Zlib, Rsrc)"; break;
+-		case 7: std::cout << " (LZVN, Attr)"; break;
+-		case 8: std::cout << " (LZVN, Rsrc)"; break;
+-		case 9: std::cout << " (Uncompressed, Attr)"; break;
+-		case 10: std::cout << " (Uncompressed, Rsrc)"; break;
+-		case 11: std::cout << " (LZFSE, Attr)"; break;
+-		case 12: std::cout << " (LZFSE, Rsrc)"; break;
+-		case 13: std::cout << " (LZBITMAP, Attr)"; break;
+-		case 14: std::cout << " (LZBITMAP, Rsrc)"; break;
+-		default: std::cout << " (Unknown)"; break;
+-		}
+-
+-		std::cout << std::endl;
+-	}
+-
+-	if (!IsDecompAlgoSupported(hdr->algo))
+-	{
+-		if (g_debug & Dbg_Errors) {
+-			std::cout << "Unsupported decompression algorithm." << std::endl;
+-			DumpHex(std::cout, compressed.data(), compressed.size());
+-		}
+-		return false;
+-	}
+-
+-	if (IsDecompAlgoInRsrc(hdr->algo))
+-	{
+-		std::vector<uint8_t> rsrc;
+-		size_t k;
+-
+-		bool rc = dir.GetAttribute(rsrc, ino, "com.apple.ResourceFork");
+-
+-		if (!rc)
+-		{
+-			if (g_debug & Dbg_Errors)
+-				std::cout << "Decmpfs: Could not find resource fork " << ino << std::endl;
+-			decompressed.clear();
+-			return false;
+-		}
+-
+-		if (hdr->algo == 4) // Zlib, rsrc
+-		{
+-			RsrcForkHeader rsrc_hdr;
+-
+-			memcpy(&rsrc_hdr, rsrc.data(), sizeof(rsrc_hdr));
+-
+-			if (rsrc_hdr.data_offset > rsrc.size())
+-			{
+-				if (g_debug & Dbg_Errors)
+-					std::cout << "Decmpfs: Invalid data offset in rsrc header." << std::endl;
+-				return false;
+-			}
+-
+-			const uint8_t *cmpf_rsrc_base = rsrc.data() + rsrc_hdr.data_offset + sizeof(uint32_t);
+-			const CmpfRsrc *cmpf_rsrc = reinterpret_cast<const CmpfRsrc *>(cmpf_rsrc_base);
+-
+-			decompressed.resize((hdr->size + 0xFFFF) & 0xFFFF0000);
+-
+-			for (k = 0; k < cmpf_rsrc->entries; k++)
+-			{
+-				size_t src_offset = cmpf_rsrc->entry[k].off;
+-				const uint8_t *src = cmpf_rsrc_base + src_offset;
+-				size_t src_len = cmpf_rsrc->entry[k].size;
+-				uint8_t *dst = decompressed.data() + 0x10000 * k;
+-				size_t expected_len = hdr->size - (0x10000 * k);
+-				if (expected_len > 0x10000)
+-					expected_len = 0x10000;
+-
+-				if (src_len > 0x10001)
+-				{
+-					if (g_debug & Dbg_Errors)
+-						std::cout << "Decmpfs: In rsrc, src_len too big (" << src_len << ")" << std::endl;
+-					return false;
+-				}
+-
+-				if (src[0] == 0x78)
+-				{
+-					decoded_bytes = DecompressZLib(dst, 0x10000, src, src_len);
+-				}
+-				else if ((src[0] & 0x0F) == 0x0F)
+-				{
+-					memcpy(dst, src + 1, src_len - 1);
+-					decoded_bytes = src_len - 1;
+-				}
+-				else
+-				{
+-					if (g_debug & Dbg_Errors)
+-						std::cout << "Decmpfs: Something wrong with zlib data." << std::endl;
+-					decompressed.clear();
+-					return false;
+-				}
+-
+-				if (expected_len != decoded_bytes)
+-				{
+-					if (g_debug & Dbg_Errors)
+-						std::cout << "Decmpfs: Expected len != decompressed len: " << expected_len << " != " << decoded_bytes << std::endl;
+-					return false;
+-				}
+-			}
+-		}
+-		else
+-		{
+-			const uint32_t *off_list = reinterpret_cast<const uint32_t *>(rsrc.data());
+-
+-			decompressed.resize((hdr->size + 0xFFFF) & 0xFFFF0000);
+-
+-			for (k = 0; (k << 16) < decompressed.size(); k++) {
+-				size_t expected_len = hdr->size - (0x10000 * k);
+-				if (expected_len > 0x10000)
+-					expected_len = 0x10000;
+-				const uint8_t *src = rsrc.data() + off_list[k];
+-				size_t src_len = off_list[k + 1] - off_list[k];
+-
+-				if (src_len > 0x10001) {
+-					if (g_debug & Dbg_Errors)
+-						std::cout << "Decmpfs: In rsrc, src_len too big (" << src_len << ")" << std::endl;
+-					return false;
+-				}
+-
+-				switch (hdr->algo) {
+-				case 8:
+-					if (src[0] == 0x06) {
+-						memcpy(decompressed.data() + (k << 16), src + 1, src_len - 1);
+-						decoded_bytes = src_len - 1;
+-					}
+-					else
+-						decoded_bytes = DecompressLZVN(decompressed.data() + (k << 16), expected_len, src, src_len);
+-					break;
+-				case 10:
+-					// Assuming ...
+-					memcpy(decompressed.data() + (k << 16), src + 1, src_len - 1);
+-					decoded_bytes = src_len - 1;
+-					break;
+-				case 12:
+-					// Assuming ...
+-					decoded_bytes = DecompressLZFSE(decompressed.data() + (k << 16), expected_len, src, src_len);
+-					// TODO is there also an uncompressed variant?
+-					break;
+-				case 14:
+-					if (src[0] == 0xFF) {
+-						memcpy(decompressed.data() + (k << 16), src + 1, src_len - 1);
+-						decoded_bytes = src_len - 1;
+-					}
+-					else
+-						decoded_bytes = DecompressLZBITMAP(decompressed.data() + (k << 16), expected_len, src, src_len);
+-					break;
+-				default:
+-					decoded_bytes = 0;
+-					break;
+-				}
+-
+-				if (decoded_bytes != expected_len) {
+-					if (g_debug & Dbg_Errors)
+-						std::cout << "Decmpfs: Expected length != decompressed length: " << expected_len << " != " << decoded_bytes << " [k = " << k << "]" << std::endl;
+-
+-					return false;
+-				}
+-			}
+-		}
+-
+-		decompressed.resize(hdr->size);
+-	}
+-	else
+-	{
+-		decompressed.resize(hdr->size);
+-
+-		switch (hdr->algo) {
+-		case 3:
+-			if (cdata[0] == 0x78)
+-				decoded_bytes = DecompressZLib(decompressed.data(), decompressed.size(), cdata, csize);
+-			else if (cdata[0] == 0xFF) {
+-				assert(hdr->size == csize - 1);
+-				decompressed.assign(cdata + 1, cdata + csize);
+-				decoded_bytes = decompressed.size();
+-			}
+-			else
+-				return false;
+-			break;
+-
+-		case 7:
+-			if (cdata[0] == 0x06) {
+-				assert(hdr->size == csize - 1);
+-				decompressed.assign(cdata + 1, cdata + csize);
+-				decoded_bytes = decompressed.size();
+-			}
+-			else
+-				decoded_bytes = DecompressLZVN(decompressed.data(), decompressed.size(), cdata, csize);
+-			break;
+-
+-		case 9:
+-			assert(cdata[0] == 0xCC);
+-			assert(hdr->size == csize - 1);
+-			decompressed.assign(cdata + 1, cdata + csize);
+-			decoded_bytes = decompressed.size();
+-			break;
+-
+-		case 11:
+-			// TODO uncompressed variant?
+-			decoded_bytes = DecompressLZFSE(decompressed.data(), decompressed.size(), cdata, csize);
+-			break;
+-
+-		case 13:
+-			if (cdata[0] == 0xFF) {
+-				assert(hdr->size == csize - 1);
+-				decompressed.assign(cdata + 1, cdata + csize);
+-				decoded_bytes = decompressed.size();
+-			}
+-			else
+-				decoded_bytes = DecompressLZBITMAP(decompressed.data(), decompressed.size(), cdata, csize);
+-			break;
+-
+-		default:
+-			decoded_bytes = 0;
+-			break;
+-		}
+-
+-		if (decoded_bytes != hdr->size)
+-		{
+-			if (g_debug & Dbg_Errors)
+-				std::cout << "Decmpfs: In attr, expected len != decoded len: " << hdr->size << " != " << decoded_bytes << std::endl;
+-			return false;
+-		}
+-	}
+-
+-#else
+-	if (IsDecompAlgoInRsrc(hdr->algo))
+-	{
+-		dir.GetAttribute(decompressed, ino, "com.apple.ResourceFork");
+-	}
+-	else
+-	{
+-		decompressed = compressed;
+-	}
+-#endif
+-
+-	return true;
++    using M4Apfs::Require;
++    Require(input.size() >= sizeof(CompressionHeader) && input.size() <= M4Apfs::MaxBytes, "DECMPFS_HEADER_SIZE");
++    const auto *hdr = reinterpret_cast<const CompressionHeader *>(input.data());
++    Require(hdr->signature == 0x636d7066, "DECMPFS_SIGNATURE");
++    const uint64_t size = hdr->size;
++    const uint32_t algo = hdr->algo;
++    Require(size > 0 && size <= M4Apfs::MaxBytes, "DECMPFS_SIZE_LIMIT");
++    Require(algo == 3 || algo == 4 || algo == 7 || algo == 8 || algo == 9 || algo == 10 ||
++            algo == 11 || algo == 12, "UNSUPPORTED_COMPRESSION");
++    auto decode = [&](uint8_t *dst, size_t expected, const uint8_t *src, size_t length) {
++        Require(length > 0 && length <= M4Apfs::MaxBytes, "DECMPFS_CHUNK_SIZE");
++        const bool literal = ((algo == 3 || algo == 4) && (src[0] & 15) == 15) ||
++                             ((algo == 7 || algo == 8) && src[0] == 6) || algo == 9 || algo == 10;
++        size_t written = 0;
++        if (literal) {
++            Require(length - 1 == expected, "DECMPFS_LITERAL_SIZE");
++            if (algo == 9) Require(src[0] == 0xcc, "DECMPFS_LITERAL_MARKER");
++            memcpy(dst, src + 1, expected);
++            written = expected;
++        } else if (algo == 3 || algo == 4) written = DecompressZLib(dst, expected, src, length);
++        else {
++            // One spare byte detects a decoder that fills the requested output
++            // before the stream ends. Keep the temporary allocation bounded.
++            Require(expected < M4Apfs::MaxBytes, "DECOMPRESSION_PROBE_LIMIT");
++            std::vector<uint8_t> probe(expected + 1);
++            if (algo == 7 || algo == 8)
++                written = DecompressLZVN(probe.data(), probe.size(), src, length);
++            else written = DecompressLZFSE(probe.data(), probe.size(), src, length);
++            Require(written == expected, "DECOMPRESSION_LENGTH");
++            memcpy(dst, probe.data(), expected);
++        }
++        Require(written == expected, "DECOMPRESSION_LENGTH");
++    };
++    out.resize(size);
++    if (!IsDecompAlgoInRsrc(algo)) {
++        decode(out.data(), size, input.data() + sizeof(*hdr), input.size() - sizeof(*hdr));
++        return true;
++    }
++    std::vector<uint8_t> rsrc;
++    Require(dir.GetAttribute(rsrc, ino, "com.apple.ResourceFork"), "RESOURCE_FORK_READ");
++    Require(rsrc.size() <= M4Apfs::MaxBytes, "RESOURCE_FORK_LIMIT");
++    const size_t count = (size + 65535) / 65536;
++    Require(count > 0 && count <= M4Apfs::MaxBytes / 65536, "DECMPFS_CHUNK_COUNT");
++    size_t base = 0, table = 0;
++    if (algo == 4) {
++        Require(rsrc.size() >= sizeof(RsrcForkHeader), "RESOURCE_FORK_HEADER");
++        const auto *rh = reinterpret_cast<const RsrcForkHeader *>(rsrc.data());
++        base = uint32_t(rh->data_offset);
++        Require(base <= rsrc.size() && rsrc.size() - base >= 8, "RESOURCE_FORK_OFFSET");
++        base += 4;
++        const auto *entries = reinterpret_cast<const le_uint32_t *>(rsrc.data() + base);
++        Require(*entries == count && count <= (rsrc.size() - base - 4) / sizeof(CmpfRsrcEntry), "RESOURCE_FORK_TABLE");
++        table = base + 4;
++    } else Require((count + 1) <= rsrc.size() / sizeof(le_uint32_t), "RESOURCE_FORK_TABLE");
++    for (size_t k = 0; k < count; ++k) {
++        M4Apfs::Step();
++        size_t offset, length;
++        if (algo == 4) {
++            const auto *entry = reinterpret_cast<const CmpfRsrcEntry *>(rsrc.data() + table) + k;
++            Require(uint32_t(entry->off) >= 4 + count * sizeof(*entry), "RESOURCE_FORK_CHUNK_OFFSET");
++            offset = base + uint32_t(entry->off);
++            length = entry->size;
++        } else {
++            const auto *offsets = reinterpret_cast<const le_uint32_t *>(rsrc.data());
++            offset = offsets[k];
++            Require(offset >= (count + 1) * sizeof(le_uint32_t) && offsets[k + 1] >= offset, "RESOURCE_FORK_CHUNK_OFFSET");
++            length = uint32_t(offsets[k + 1]) - offset;
++        }
++        Require(offset <= rsrc.size() && length <= rsrc.size() - offset && length <= 65537,
++                "RESOURCE_FORK_CHUNK_RANGE");
++        const size_t expected = std::min<uint64_t>(65536, size - k * 65536);
++        decode(out.data() + k * 65536, expected, rsrc.data() + offset, length);
++    }
++    return true;
+ }
+--- a/ApfsLib/PList.h
++++ b/ApfsLib/PList.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <cstdint>
+ 
+ #include <vector>
+ #include <map>
+--- /dev/null
++++ b/ApfsLib/ReaderLimits.h
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Bounds for the unencrypted, read-only camera reader, not upstream.
++#pragma once
++#include <cstdint>
++#include <cstring>
++#include <stdexcept>
++#include <string>
++namespace M4Apfs {
++constexpr uint64_t MaxBytes = 128ULL * 1024 * 1024;
++constexpr uint64_t MaxCheckpoints = 32768;
++constexpr uint64_t MaxOperations = 1000000;
++constexpr unsigned MaxDepth = 64;
++inline void Require(bool ok, const char *reason) {
++    if (!ok) throw std::runtime_error(reason);
++}
++inline void Step() {
++    static uint64_t steps = 0;
++    Require(++steps <= MaxOperations, "OPERATION_LIMIT");
++}
++template<class T> inline T Load(const void *pointer) {
++    T value;
++    std::memcpy(&value, pointer, sizeof(value));
++    return value;
++}
++}
+--- a/ApfsLib/Util.cpp
++++ b/ApfsLib/Util.cpp
+@@ -429,38 +429,10 @@
+ 
+ size_t DecompressZLib(uint8_t *dst, size_t dst_size, const uint8_t *src, size_t src_size)
+ {
+-	// size_t nwr = 0;
+-	int ret;
+-
+-	z_stream strm;
+-
+-	memset(&strm, 0, sizeof(strm));
+-	strm.zalloc = Z_NULL;
+-	strm.zfree = Z_NULL;
+-	strm.avail_in = src_size;
+-	strm.avail_out = dst_size;
+-	strm.next_in = const_cast<uint8_t *>(src);
+-	strm.next_out = dst;
+-
+-	ret = inflateInit2(&strm, 15);
+-	if (ret != Z_OK)
+-	{
+-		std::cerr << "DecompressZLib: inflateInit failed." << std::endl;
+-		return 0;
+-	}
+-
+-	do {
+-		ret = inflate(&strm, Z_NO_FLUSH);
+-		if (ret == Z_NEED_DICT || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR)
+-		{
+-			strm.avail_out = 0;
+-			break;
+-		}
+-	} while (ret != Z_STREAM_END);
+-
+-	inflateEnd(&strm);
+-
+-	return dst_size - strm.avail_out;
++    // uncompress terminates on truncated input or an exhausted output buffer.
++    if (src_size > 128U * 1024 * 1024 || dst_size > 128U * 1024 * 1024) return 0;
++    uLongf actual = dst_size;
++    return uncompress(dst, &actual, src, src_size) == Z_OK ? actual : 0;
+ }
+ 
+ size_t DecompressADC(uint8_t * dst, size_t dst_size, const uint8_t * src, size_t src_size)
