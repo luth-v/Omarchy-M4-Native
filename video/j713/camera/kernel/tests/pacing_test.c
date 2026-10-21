@@ -34,6 +34,7 @@ typedef uint64_t __le64;
 #define TASK_RUNNING 0
 #define V4L2_FIELD_NONE 1
 #define dev_dbg(...) ((void)0)
+#define dev_info(...) ((void)0)
 #include "../j713_cam_wire.h"
 #include ".build/experiment_types.h"
 
@@ -56,14 +57,16 @@ struct cam_device {
 	u64 capture_base;
 	struct list_head buffers;
 	struct completion frames, stream_started;
+	int queue;
 };
 
 static struct cam_device cam;
 static struct cam_buffer_vb2 test_buffer;
-static u8 capture[CAM_CAPTURE_SIZE], dest[CAM_DELIVER_SIZE];
+static u8 capture[CAM_CAPTURE_MAX], dest[1920 * 1080 * 3 / 2];
+static unsigned int test_height = 1264;
 static u64 now_ns;
 static unsigned long jiffies, deadline;
-static unsigned int waits, event_count, done_count, errors, barriers, stage;
+static unsigned int waits, event_count, done_count, errors, barriers, stage, queue_errors;
 static unsigned int stop_after_requeues, expected_at_requeue, source_slot;
 static u32 expected_meta;
 static int bad_source;
@@ -124,6 +127,12 @@ static void *cam_pointer(struct cam_device *device, u64 address, size_t size)
 	return (int)source_slot == bad_source ? NULL : capture + address - device->capture_base;
 }
 
+static void vb2_queue_error(int *queue)
+{
+	assert(queue == &cam.queue && cam.fw_lock && !cam.buffers_lock);
+	queue_errors++;
+}
+
 static void *vb2_plane_vaddr(struct vb2_buffer *vb, unsigned int plane)
 {
 	assert(vb == &test_buffer.vb.vb2_buf && !plane);
@@ -132,7 +141,7 @@ static void *vb2_plane_vaddr(struct vb2_buffer *vb, unsigned int plane)
 
 static void vb2_set_plane_payload(struct vb2_buffer *vb, unsigned int plane, size_t size)
 {
-	assert(vb == &test_buffer.vb.vb2_buf && !plane && size == CAM_DELIVER_SIZE);
+	assert(vb == &test_buffer.vb.vb2_buf && !plane && size == cam.geometry.deliver_size);
 	vb->payload = size;
 }
 
@@ -145,7 +154,7 @@ static void vb2_buffer_done(struct vb2_buffer *vb, enum vb2_buffer_state state)
 		errors++;
 		return;
 	}
-	assert(done_count < ARRAY_SIZE(deliveries) && vb->payload == CAM_DELIVER_SIZE);
+	assert(done_count < ARRAY_SIZE(deliveries) && vb->payload == cam.geometry.deliver_size);
 	assert(test_buffer.vb.field == V4L2_FIELD_NONE && dest[0] == 0x30 + source_slot);
 	deliveries[done_count++] = (struct delivery) {
 		now_ns, vb->timestamp, source_slot, test_buffer.vb.sequence,
@@ -272,7 +281,7 @@ static void reset(void)
 	unsigned int slot;
 
 	cam = (struct cam_device) { .capture_base = 0x10040000000ULL };
-	assert(cam_geometry_init(&cam.geometry, 1264));
+	assert(cam_geometry_init(&cam.geometry, test_height));
 	cam.buffers.available = true;
 	test_buffer = (struct cam_buffer_vb2) { };
 	for (slot = 0; slot < CAM_FRAME_COUNT; slot++)
@@ -450,14 +459,35 @@ static void successful_deliveries_only(void)
 	assert(cam.session.last_delivery_ns == 35 * NSEC_PER_MSEC);
 }
 
+static void late_output_replacement(void)
+{
+	reset();
+	cam.fw_lock = true;
+	cam.session.output.rejected = true;
+	queue_errors = 0;
+	cam_deliver(&cam, 0, 11);
+	assert(!done_count && errors == 1 && !barriers && !cam.dead && queue_errors == 1);
+	assert(cam.session.stop_requested && cam.session.output_rejected && cam.session.dropped == 1);
+}
+
 int main(void)
 {
+	/* Referenced here so a deleted call fails at runtime, not as unused. */
+	(void)vb2_queue_error;
 	ready_slots();
 	immediate_delivery();
 	batch_remainder();
 	requeue_boundary();
 	dead_and_timeout();
 	successful_deliveries_only();
-	puts("pacing tests passed: immediate ACKed renders, return order, stale wakeups, batch remainder/reset, non-render exclusion, settle/requeue/metadata/framing order, stop boundary, DEAD, one-second deadline, DONE-only host gaps and firmware timestamps");
+	late_output_replacement();
+	test_height = 1888;
+	immediate_delivery();
+	batch_remainder();
+	requeue_boundary();
+	dead_and_timeout();
+	successful_deliveries_only();
+	late_output_replacement();
+	puts("pacing tests passed: both sizes, immediate ACKed renders, return order, stale wakeups, batch remainder/reset, non-render exclusion, settle/requeue/metadata/framing order, stop boundary, DEAD, one-second deadline, DONE-only host gaps and firmware timestamps, late output rejection");
 	return 0;
 }

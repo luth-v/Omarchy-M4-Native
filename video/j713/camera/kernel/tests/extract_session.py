@@ -51,3 +51,13 @@ if sorted(re.findall(r'\.([a-z_]+) = ([0-9]+),', defaults[1])) != [('colour', '1
                                            function(firmware, 'cam_stream_thread'))))
 
 (OUT / 'snapshot_impl.h').write_text(function((KERNEL / 'j713_isp_d_dt_loader.c').read_text(), 'd_snapshot_firmware'))
+constants = '\n'.join(re.findall(
+    r'^#define CAM_(?:VM_BASE|CODE_SIZE|DATA_SIZE|FW_END|IDENTITY_SIZE|IDENTITY_MAX|'
+    r'IDENTITY_SPAN\(cam\)|SHARED_VA_END|GUARD_PATTERN\(index\)) .+$', header, re.M))
+(OUT / 'claim_constants.h').write_text(constants + '\n')
+(OUT / 'claim_impl.h').write_text('\n'.join((
+    function((KERNEL / 'j713_cam_main.c').read_text(), 'cam_claim'),
+    function(firmware, 'cam_pointer'))))
+(OUT / 'format_impl.h').write_text('\n'.join(function(v4l2, name) for name in
+    ('cam_format', 'cam_get_fmt', 'cam_try_fmt', 'cam_set_fmt', 'cam_enum_sizes',
+     'cam_queue_setup', 'cam_buffer_prepare')))

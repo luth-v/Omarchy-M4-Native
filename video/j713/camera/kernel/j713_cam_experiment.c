@@ -102,6 +102,11 @@ void cam_experiment_begin(struct cam_device *cam)
 	e->config = cam_experiment_config;
 	mutex_unlock(&cam_experiment_lock);
 	e->frame_rate = e->config.fps == 1 ? (cam->frame_rate ?: 30) : e->config.fps;
+	/* 1920x1080 offers 30 fps only: a 60 pin becomes 30 for this session. */
+	if (e->frame_rate == 60 && cam->geometry.width == 1920) {
+		e->frame_rate = 30;
+		dev_info(cam->dev, "fps: 60 not offered at 1080p, using 30\n");
+	}
 	WRITE_ONCE(cam_setfile_result, 0);
 	WRITE_ONCE(cam_lenscal_result, 0);
 	e->colour_active = e->config.colour;
@@ -210,7 +215,8 @@ int cam_framing_start(struct cam_device *cam)
 	lockdep_assert_held(&cam->fw_lock);
 	if (!e->framing_enabled || cam_dead(cam))
 		return 0;
-	ret = cam_framing_crop(cam, "S3.5");
+	/* The host-crop 1080p route sends neither crop opcode. */
+	ret = cam->geometry.width == 1920 ? 0 : cam_framing_crop(cam, "S3.5");
 	if (!ret && !cam_dead(cam))
 		ret = cam_framing_zoom(cam, "S3.5", zoom);
 	if (!ret && !cam_dead(cam) && e->config.framing == 2) {

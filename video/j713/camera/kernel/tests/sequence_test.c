@@ -15,7 +15,7 @@ static void write_replay(void)
 		fwrite(&trace[i].argument, sizeof(trace[i].argument), 1, stdout);
 		fwrite(trace[i].command, sizeof(command), 1, stdout);
 	}
-	fwrite(capture, CAM_CAPTURE_SIZE, 1, stdout);
+	fwrite(capture, cam.geometry.capture_size, 1, stdout);
 	fwrite(command, sizeof(command), 1, stdout);
 	fwrite(&record, sizeof(record), 1, stdout);
 	strip_pacing_log();
@@ -25,7 +25,7 @@ static void write_replay(void)
 	fwrite(logs, length, 1, stdout);
 }
 
-static void production_trace(bool output)
+static void production_trace(bool output, bool tail)
 {
 	unsigned int height, colour, session;
 
@@ -33,6 +33,7 @@ static void production_trace(bool output)
 		for (colour = 0; colour <= 1; colour++)
 			for (session = 0; session < 2; session++) {
 				reset(height);
+				cam.capture_span = tail ? CAM_CAPTURE_MAX : CAM_CAPTURE_SIZE;
 				cam.fw_sessions = session;
 				cam_experiment_config = cam_production_defaults;
 				cam_experiment_config.colour = colour;
@@ -44,19 +45,46 @@ static void production_trace(bool output)
 			}
 }
 
+static void highres_trace(bool output)
+{
+	unsigned int colour, session, rate;
+
+	for (colour = 0; colour <= 1; colour++)
+		for (session = 0; session < 2; session++)
+			for (rate = 30; rate <= 60; rate += 30) {
+				reset(1888);
+				cam.fw_sessions = session;
+				cam.frame_rate = rate;
+				cam_experiment_config = cam_production_defaults;
+				cam_experiment_config.colour = colour;
+				assert(!cam_session_start(&cam));
+				run_stream();
+				if (output)
+					write_replay();
+			}
+}
+
 int main(int argc, char **argv)
 {
 	(void)cam_experiment_uint_set;
 	(void)count_opcode;
-	capture = malloc(CAM_CAPTURE_SIZE);
+	capture = malloc(CAM_CAPTURE_MAX);
 	assert(capture);
 	if (argc == 2) {
-		assert(!strcmp(argv[1], "--production-trace"));
-		production_trace(true);
+		if (!strcmp(argv[1], "--1080p-trace"))
+			highres_trace(true);
+		else if (!strcmp(argv[1], "--production-trace-no-tail"))
+			production_trace(true, false);
+		else {
+			assert(!strcmp(argv[1], "--production-trace"));
+			production_trace(true, true);
+		}
 	} else {
 		assert(argc == 1);
-		production_trace(false);
-		puts("sequence tests passed: 8 production sessions retain requests, pool, IPC and logs");
+		production_trace(false, true);
+		production_trace(false, false);
+		highres_trace(false);
+		puts("sequence tests passed: 8 production sessions with and without the tail, 8 1080p sessions, requests, pool, IPC and logs");
 	}
 	free(capture);
 	return 0;

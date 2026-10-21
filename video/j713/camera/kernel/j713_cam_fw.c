@@ -10,7 +10,7 @@ void *cam_pointer(struct cam_device *cam, u64 address, size_t size)
 	size_t offset;
 
 	if (cam->identity && d_range_offset(address, cam->window_base,
-					  CAM_IDENTITY_SIZE, size, &offset))
+					  CAM_IDENTITY_SPAN(cam), size, &offset))
 		return cam->identity + PAGE_SIZE + offset;
 	if (!cam->ram || !d_range_offset(address, CAM_VM_BASE + CAM_FW_END,
 					cam->ram_size, size, &offset))
@@ -121,6 +121,7 @@ static bool cam_print_poll(struct cam_device *cam)
 	dma_rmb();
 	while (cursor != producer && budget--) {
 		memcpy(&record, ring + cursor, sizeof(record));
+		cam_output_record(&cam->session.output, &record);
 		if (!le16_to_cpu(record.kind)) {
 			if (cam_fw_log)
 				dev_info(cam->dev, "ISP: %.*s\n", (int)sizeof(record.text), record.text);
@@ -708,7 +709,11 @@ static int cam_session_setup(struct cam_device *cam)
 	if (!ret && !cam_dead(cam))
 		ret = cam_fps_start(cam);
 	if (!ret && !cam_dead(cam))
+		ret = cam_output_verify(cam, false);
+	if (!ret && !cam_dead(cam))
 		ret = cam_capture(cam);
+	if (!ret && !cam_dead(cam))
+		ret = cam_output_verify(cam, true);
 	return cam_dead(cam) ? -EIO : ret;
 }
 
@@ -767,7 +772,8 @@ int cam_session_start(struct cam_device *cam)
 	cam_print_drain(cam);
 	ret = -EIO;
 	if (!cam_dead(cam)) {
-		memset(cam_pointer(cam, cam->capture_base, CAM_CAPTURE_SIZE), 0, CAM_CAPTURE_SIZE);
+		memset(cam_pointer(cam, cam->capture_base, cam->geometry.capture_size), 0,
+		       cam->geometry.capture_size);
 		dma_wmb();
 		ret = cam_session_setup(cam);
 	}
@@ -780,7 +786,8 @@ int cam_session_start(struct cam_device *cam)
 		}
 	}
 	if (ret) {
-		cam_fail(cam, "session start failed");
+		if (!cam->session.output_rejected)
+			cam_fail(cam, "session start failed");
 		cam_session_stop(cam);
 	} else {
 		dev_info(cam->dev, "session %u start: output=%ux%u crop_y=%u\n",
@@ -823,7 +830,7 @@ void cam_reset_memory(struct cam_device *cam)
 	memset(cam_pointer(cam, cam->window_base, CAM_EXTRA_SIZE), 0, CAM_EXTRA_SIZE);
 	if (high)
 		memset(cam_pointer(cam, cam->arena_base, high), 0, high);
-	memset(cam_pointer(cam, cam->capture_base, CAM_CAPTURE_SIZE), 0, CAM_CAPTURE_SIZE);
+	memset(cam_pointer(cam, cam->capture_base, cam->capture_span), 0, cam->capture_span);
 	dma_wmb();
 	cam->shmem_used = 0;
 	cam->print_cursor = CAM_PRINT_RECORD_SIZE;

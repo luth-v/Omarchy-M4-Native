@@ -67,7 +67,7 @@ enum cam_state { CAM_IDLE, CAM_STREAMING, CAM_DEAD };
 struct completion { unsigned int done; };
 struct kernel_param { void *arg; };
 struct task_struct { int unused; };
-struct vb2_queue { bool streaming; };
+struct vb2_queue { bool streaming, busy; };
 struct cam_device {
 	void *dev, *data;
 	bool fw_lock, service_lock, firmware_running, shutting_down, query_stalled;
@@ -75,13 +75,15 @@ struct cam_device {
 	u8 pending_endpoint;
 	unsigned int sessions, fw_sessions, frame_rate;
 	enum cam_state state;
-	struct cam_geometry geometry;
+	struct cam_geometry geometry, format;
+	u32 out_height;
 	struct cam_session session;
 	struct vb2_queue queue;
 	struct cam_arena arena;
 	struct task_struct *thread;
 	struct completion reply, frames, stream_started;
 	u64 capture_base, bt_iova, last_stop_ns;
+	size_t capture_span;
 	u32 sensor_version, presets, word_68, word_78;
 };
 
@@ -107,6 +109,8 @@ static bool retune_at_send, retune_at_request;
 static bool streaming, thread_stop, stop_before_requeue, batch_timeout;
 static bool dead_at_requeue, returns_at_load;
 static bool drop_frames;
+static unsigned int output_model;
+static bool output_pending;
 static unsigned int dead_after_send, drift_at_requeue, framing_sends, limited_logs, suppressed_logs;
 static u16 zoom_reply[2], reject_status;
 static struct framing_event {
@@ -205,8 +209,9 @@ static void *cam_pointer(struct cam_device *device, u64 address, size_t size)
 		return command;
 	if (address == CAM_QUERY_RECORD && size <= sizeof(record))
 		return &record;
-	if (address >= device->capture_base && address - device->capture_base <= CAM_CAPTURE_SIZE &&
-	    size <= CAM_CAPTURE_SIZE - (address - device->capture_base))
+	if (address >= device->capture_base &&
+	    address - device->capture_base <= device->geometry.capture_size &&
+	    size <= device->geometry.capture_size - (address - device->capture_base))
 		return capture + address - device->capture_base;
 	return NULL;
 }
@@ -349,7 +354,29 @@ static void cam_publish_status(struct cam_device *device)
 
 static void cam_print_drain(struct cam_device *device)
 {
-	(void)device;
+	struct cam_print_record message = { 0 };
+
+	if (!output_pending || !device->session.output.watching)
+		return;
+	output_pending = false;
+	if (output_model == 1)
+		return;
+	if (output_model >= 4 && device->session.output.seen) {
+		snprintf(message.text, sizeof(message.text),
+			 "MaxFESOutput was (1920, 1888), Replaced with (1920, 1080)");
+		cam_output_record(&device->session.output, &message);
+		return;
+	}
+	snprintf(message.text, sizeof(message.text),
+		 "[MSC] CH = 0x0 BES[0] originalOutputSize [1920 %u]\n",
+		 output_model == 2 ? 1080 : 1888);
+	message.dropped = cpu_to_le16(output_model == 6);
+	cam_output_record(&device->session.output, &message);
+	if (output_model == 3) {
+		snprintf(message.text, sizeof(message.text),
+			 "MaxFESOutput was (1920, 1888), Replaced with (1920, 1080)");
+		cam_output_record(&device->session.output, &message);
+	}
 }
 
 static u64 ktime_get_ns(void)
@@ -475,6 +502,8 @@ static int cam_send(struct cam_device *device, u8 endpoint, u64 address, const c
 		retune();
 	if (endpoint == 0x24) {
 		record.arg[2] = cpu_to_le64(CAM_BUFFER_ACK);
+		if (output_model == 5 && device->session.capture_issued)
+			output_pending = true;
 		/* A bad return latches DEAD while the requeue's reply still arrives. */
 		if (streaming && dead_at_requeue)
 			cam_fail(device, "invalid service record");
@@ -499,6 +528,8 @@ static int cam_send(struct cam_device *device, u8 endpoint, u64 address, const c
 			fps_max_reply = rate;
 		/* The firmware's SetMinMaxFrameRate asserts min <= max. */
 		assert(fps_min_reply <= fps_max_reply);
+		if (output_model == 4)
+			output_pending = true;
 	} else if (opcode == 0x800) {
 		unsigned int i;
 
@@ -520,6 +551,8 @@ static int cam_send(struct cam_device *device, u8 endpoint, u64 address, const c
 		put_unaligned_le16(1264, command + 0x12);
 		put_unaligned_le16(1280, command + 0x14);
 		put_unaligned_le16(device->geometry.height, command + 0x16);
+	} else if (opcode == 0xb01) {
+		output_pending = true;
 	} else if (opcode == 0x104) {
 		device->session.acked_meta = CAM_ALL_META;
 		device->session.acked_capture = CAM_ALL_META;
@@ -561,15 +594,17 @@ static void reset(unsigned int height)
 {
 	cam = (struct cam_device) {
 		.fw_lock = true, .firmware_running = true, .capture_base = 0x10040000000ULL,
-		.bt_iova = 0x10020000000ULL,
+		.bt_iova = 0x10020000000ULL, .capture_span = CAM_CAPTURE_MAX,
 	};
 	assert(cam_geometry_init(&cam.geometry, height));
+	cam.format = cam.geometry;
+	cam.out_height = height == 1888 ? 1264 : height;
 	/* Knobs off, the pre-2026-10-18 load default. fps_test.c checks the
 	 * production defaults (colour=1 framing=2 fps=1) against these.
 	 */
 	cam_experiment_config = (struct cam_experiment_config) { };
 	memset(command, 0xa5, sizeof(command));
-	memset(capture, 0xa5, CAM_CAPTURE_SIZE);
+	memset(capture, 0xa5, height == 1888 ? CAM_CAPTURE_MAX : CAM_CAPTURE_SIZE);
 	memset(&record, 0xa5, sizeof(record));
 	memset(blob_data, 0, sizeof(blob_data));
 	put_unaligned_le32(htobe32(0x22240106), blob_data);
@@ -607,6 +642,8 @@ static void reset(unsigned int height)
 	dead_at_requeue = false;
 	returns_at_load = false;
 	drop_frames = false;
+	output_model = 0;
+	output_pending = false;
 	dead_after_send = 0;
 	drift_at_requeue = 0;
 	framing_sends = 0;

@@ -286,7 +286,7 @@ static void crop_and_white_balance(unsigned int height)
 
 	assert(cam_geometry_init(&g, height));
 	source = malloc(g.frame_stride);
-	dest = malloc(CAM_DELIVER_SIZE);
+	dest = malloc(g.deliver_size);
 	assert(source && dest);
 	memset(source, 0xa5, g.frame_stride);
 	for (row = 0; row < height; row++)
@@ -298,15 +298,15 @@ static void crop_and_white_balance(unsigned int height)
 		}
 	}
 	cam_crop_copy(&g, dest, source);
-	for (row = 0; row < CAM_DELIVER_HEIGHT; row++)
+	for (row = 0; row < g.deliver_height; row++)
 		for (column = 0; column < g.width; column++)
 			assert(dest[row * g.width + column] == (row + g.crop_y) % 251);
-	assert(!memcmp(dest + CAM_DELIVER_Y, source + g.y_span + g.crop_uv * g.width,
-		       CAM_DELIVER_Y / 2));
-	for (row = 0; row < CAM_DELIVER_HEIGHT / 2; row++) {
+	assert(!memcmp(dest + g.deliver_y, source + g.y_span + g.crop_uv * g.width,
+		       g.deliver_y / 2));
+	for (row = 0; row < g.deliver_height / 2; row++) {
 		for (column = 0; column < g.width; column += 2) {
-			assert(dest[CAM_DELIVER_Y + row * g.width + column] == (row + g.crop_uv) % 251);
-			assert(dest[CAM_DELIVER_Y + row * g.width + column + 1] ==
+			assert(dest[g.deliver_y + row * g.width + column] == (row + g.crop_uv) % 251);
+			assert(dest[g.deliver_y + row * g.width + column + 1] ==
 			       (row + g.crop_uv + 31) % 251);
 		}
 	}
@@ -314,16 +314,29 @@ static void crop_and_white_balance(unsigned int height)
 		source[g.y_span + i] = 143;
 		source[g.y_span + i + 1] = 114;
 	}
-	cam_crop_copy(&g, dest, source);
-	cam_white_balance(&wb, dest);
-	assert(wb.seeded && wb.u == 143 * 256 && wb.v == 114 * 256);
-	for (i = CAM_DELIVER_Y; i < CAM_DELIVER_SIZE; i++)
-		assert(dest[i] == 128);
-	for (i = 0; i < CAM_DELIVER_Y / 2; i += 2) {
-		dest[CAM_DELIVER_Y + i] = 135;
-		dest[CAM_DELIVER_Y + i + 1] = 122;
+	if (height == 1888) {
+		memset(dest + g.deliver_y, 128, g.deliver_y / 2);
+		/* Bottom third: 45 of 135 sample rows. The whole plane gets the LUT. */
+		for (i = 1920 * 360; i < g.deliver_y / 2; i += 2) {
+			dest[g.deliver_y + i] = 160;
+			dest[g.deliver_y + i + 1] = 96;
+		}
+		cam_white_balance(&g, &wb, dest);
+		assert(wb.u == 35498 && wb.v == 30037);
+		assert(dest[g.deliver_y] == 118 && dest[g.deliver_y + 1] == 139);
+		assert(dest[g.deliver_size - 2] == 150 && dest[g.deliver_size - 1] == 107);
+		wb = (struct cam_white_balance) { 0 };
 	}
-	cam_white_balance(&wb, dest);
+	cam_crop_copy(&g, dest, source);
+	cam_white_balance(&g, &wb, dest);
+	assert(wb.seeded && wb.u == 143 * 256 && wb.v == 114 * 256);
+	for (i = g.deliver_y; i < g.deliver_size; i++)
+		assert(dest[i] == 128);
+	for (i = 0; i < g.deliver_y / 2; i += 2) {
+		dest[g.deliver_y + i] = 135;
+		dest[g.deliver_y + i + 1] = 122;
+	}
+	cam_white_balance(&g, &wb, dest);
 	assert(wb.u == 142 * 256 && wb.v == 115 * 256);
 	cam_wb_lut(lut, -999);
 	assert(lut[0] == 0 && lut[47] == 0 && lut[255] == 207);
@@ -349,6 +362,7 @@ int main(void)
 	geometry_and_returns(1264);
 	crop_and_white_balance(720);
 	crop_and_white_balance(1264);
+	crop_and_white_balance(1888);
 	puts("wire tests passed");
 	return 0;
 }

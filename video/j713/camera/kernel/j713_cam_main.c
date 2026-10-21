@@ -338,22 +338,31 @@ static int cam_check_image(struct cam_device *cam, bool restore)
 	return 0;
 }
 
+/* Per 2 MiB step: the 1080p claim, then the 82f9fd25 claim at the same start. */
 static int cam_claim(struct cam_device *cam)
 {
 	unsigned long step = SZ_2M / PAGE_SIZE;
 	unsigned long count = CAM_IDENTITY_SIZE / PAGE_SIZE + 2;
+	unsigned long large = CAM_IDENTITY_MAX / PAGE_SIZE + 2;
 	unsigned long pfn = ALIGN(PFN_UP(CAM_VM_BASE + CAM_CHANNEL_MAP_END), step);
-	unsigned long last = PFN_DOWN(CAM_VM_BASE + CAM_SHARED_VA_END) - count;
+	unsigned long end = PFN_DOWN(CAM_VM_BASE + CAM_SHARED_VA_END), last = end - count;
 	unsigned long i;
 	int ret;
 
-	for (; pfn <= last; pfn += step)
+	for (; pfn <= last; pfn += step) {
+		if (pfn + large <= end &&
+		    !alloc_contig_range(pfn, pfn + large, ACR_FLAGS_NONE, GFP_KERNEL)) {
+			count = large;
+			break;
+		}
 		if (!alloc_contig_range(pfn, pfn + count, ACR_FLAGS_NONE, GFP_KERNEL))
 			break;
+	}
 	if (pfn > last) {
 		dev_err(cam->dev, "no free %lu-page identity claim in proven shared-VA bounds\n", count);
 		return -ENOMEM;
 	}
+	cam->capture_span = count == large ? CAM_CAPTURE_MAX : CAM_CAPTURE_SIZE;
 	cam->claim_pages = pfn_to_page(pfn);
 	cam->claim_count = count;
 	cam->window_base = PFN_PHYS(pfn + 1);
@@ -363,7 +372,7 @@ static int cam_claim(struct cam_device *cam)
 	if (ret)
 		return ret;
 	/* Once the alias exists even initialization must avoid the linear map. */
-	memset(cam->identity + PAGE_SIZE, 0, CAM_IDENTITY_SIZE);
+	memset(cam->identity + PAGE_SIZE, 0, CAM_IDENTITY_SPAN(cam));
 	for (i = 0; i < count; i += count - 1) {
 		u64 *words = cam->identity + i * PAGE_SIZE;
 		unsigned int w;
@@ -425,7 +434,7 @@ static int cam_map_firmware(struct cam_device *cam)
 	if (!(cam->domain->pgsize_bitmap & PAGE_SIZE) ||
 	    cam->domain->geometry.aperture_start > CAM_VM_BASE ||
 	    cam->domain->geometry.aperture_end < CAM_VM_BASE + cam->map_end - 1 ||
-	    cam->domain->geometry.aperture_end < cam->window_base + CAM_IDENTITY_SIZE - 1)
+	    cam->domain->geometry.aperture_end < cam->window_base + CAM_IDENTITY_SPAN(cam) - 1)
 		return -ERANGE;
 	ret = iommu_map(cam->domain, CAM_VM_BASE, D_CODE_PHYS, D_CODE_SIZE, D_PROT, GFP_KERNEL);
 	if (ret)
@@ -454,11 +463,11 @@ static int cam_map_firmware(struct cam_device *cam)
 			return -EFAULT;
 	}
 	ret = iommu_map(cam->domain, cam->window_base, cam->window_base,
-			CAM_IDENTITY_SIZE, D_PROT, GFP_KERNEL);
+			CAM_IDENTITY_SPAN(cam), D_PROT, GFP_KERNEL);
 	if (ret)
 		return ret;
-	cam->identity_mapped = CAM_IDENTITY_SIZE;
-	for (offset = 0; offset < CAM_IDENTITY_SIZE; offset += PAGE_SIZE)
+	cam->identity_mapped = CAM_IDENTITY_SPAN(cam);
+	for (offset = 0; offset < CAM_IDENTITY_SPAN(cam); offset += PAGE_SIZE)
 		if (iommu_iova_to_phys(cam->domain, cam->window_base + offset) !=
 		    cam->window_base + offset)
 			return -EFAULT;
@@ -809,6 +818,8 @@ static int cam_probe(struct platform_device *pdev)
 	cam->ram_size = cam->map_end - CAM_FW_END;
 	cam->print_cursor = CAM_PRINT_RECORD_SIZE;
 	cam_geometry_init(&cam->geometry, out_height);
+	cam->format = cam->geometry;
+	cam->out_height = out_height;
 	cam->cpu = cam_map_reg(pdev, "cpu", 0x48d600000ULL, 0x100);
 	if (IS_ERR(cam->cpu)) {
 		ret = PTR_ERR(cam->cpu);
@@ -871,9 +882,10 @@ static int cam_probe(struct platform_device *pdev)
 	if (ret)
 		return ret; /* The V4L2 release callback owns cleanup from registration. */
 	platform_set_drvdata(pdev, cam);
-	dev_info(cam->dev, "probed: claim=%#llx..%#llx held=%lu+%zu bytes; %s NV12 1280x720\n",
-		 cam->window_base - PAGE_SIZE, cam->window_base + CAM_IDENTITY_SIZE + PAGE_SIZE,
-		 CAM_IDENTITY_SIZE + 2 * PAGE_SIZE, cam->ram_size, video_device_node_name(&cam->video));
+	dev_info(cam->dev, "probed: claim=%#llx..%#llx held=%zu+%zu bytes; %s NV12 1280x720%s\n",
+		 cam->window_base - PAGE_SIZE, cam->window_base + CAM_IDENTITY_SPAN(cam) + PAGE_SIZE,
+		 CAM_IDENTITY_SPAN(cam) + 2 * PAGE_SIZE, cam->ram_size, video_device_node_name(&cam->video),
+		 cam->capture_span == CAM_CAPTURE_MAX ? ", 1920x1080" : "; no 1080p tail");
 	return 0;
 release:
 	if (!cam_memory_release(cam))

@@ -58,8 +58,8 @@ struct vb2_queue { int unused; };
 struct platform_device { int unused; };
 struct task_struct { int unused; };
 struct apple_mbox { unsigned char *regs; };
-struct cam_geometry { u32 width, height, crop_y; };
-struct cam_session { bool active; u64 start_ns; };
+struct cam_geometry { u32 width, height, crop_y; size_t capture_size; };
+struct cam_session { bool active, output_rejected; u64 start_ns; };
 
 struct cam_device {
 	void *dev;
@@ -76,13 +76,14 @@ struct cam_device {
 	char dead_reason[160];
 	bool firmware_started, firmware_running, shutting_down, queue_ready, service_active;
 	unsigned int sessions, fw_starts, fw_sessions;
-	struct cam_geometry geometry;
+	struct cam_geometry geometry, format;
 	struct cam_session session;
 	void *rtk;
 	struct apple_mbox *mbox;
 	unsigned char *cpu, *gpio;
 	u32 control;
 	u64 capture_base, last_stop_ns, poweroff_ns;
+	size_t capture_span;
 	struct completion frames, stream_started;
 	u32 sensor_version, presets;
 };
@@ -103,6 +104,7 @@ static bool cam_fw_restart = true;
 static unsigned int fw_starts, worker_runs, caller_steps, module_refs;
 static int rearm_result, wake_result, bootstrap_result, setup_result, thread_result;
 static int sleep_result, down_result;
+static bool setup_rejected;
 static enum vb2_buffer_state returned;
 static size_t event_count;
 static u64 now_ns;
@@ -348,8 +350,11 @@ static void *cam_pointer(struct cam_device *device, u64 address, size_t size)
 
 static int cam_session_setup(struct cam_device *device)
 {
-	(void)device;
 	hw_step('U');
+	if (setup_rejected) {
+		device->session.output_rejected = true;
+		return -ERANGE;
+	}
 	return setup_result;
 }
 
@@ -465,7 +470,9 @@ static void reset(bool running)
 		.rtk = running ? &rtk_instance : NULL, .mbox = &mbox, .cpu = cpu_regs,
 		.gpio = gpio_regs, .fw_starts = 1, .fw_sessions = 1, .sessions = 1,
 		.thread = running ? &stream_task : NULL, .idle_work = { .pending = running },
-		.geometry = { 1280, 720, 0 }, .capture_base = 0x1000, .last_stop_ns = 1,
+		.geometry = { 1280, 720, 0, CAM_CAPTURE_SIZE },
+		.format = { 1280, 720, 0, CAM_CAPTURE_SIZE }, .capture_base = 0x1000, .last_stop_ns = 1,
+		.capture_span = CAM_CAPTURE_SIZE,
 		.poweroff_ns = running ? 0 : 1,
 	};
 	mbox.regs = mbox_regs;
@@ -483,6 +490,7 @@ static void reset(bool running)
 	wake_result = 0;
 	bootstrap_result = 0;
 	setup_result = 0;
+	setup_rejected = false;
 	thread_result = 0;
 	sleep_result = 0;
 	down_result = 0;
@@ -638,6 +646,34 @@ static void no_worker_needed(void)
 	assert(stream_on() == -EIO && !strcmp(events, "r") && !worker_runs);
 }
 
+static void format_latch_and_output_rejection(void)
+{
+	unsigned int restart;
+
+	reset(true);
+	cam.thread = NULL;
+	cam.format.width = 1920;
+	cam.format.height = 1888;
+	assert(!stream_on() && cam.geometry.width == 1920 && cam.geometry.height == 1888);
+	for (restart = 0; restart < 2; restart++) {
+		reset(true);
+		cam.thread = NULL;
+		cam_fw_restart = restart;
+		setup_rejected = true;
+		signal_caller();
+		assert(stream_on() == -EIO && !cam_dead(&cam));
+		assert(cam.state == CAM_IDLE && !cam.firmware_running && !cam.thread);
+		assert(returned == VB2_BUF_STATE_QUEUED && worker_runs == 2 && !caller_steps);
+		assert(!strcmp(dead_reason, "none") && !strchr(events, 'E'));
+	}
+	/* A layout larger than the probe's claim never reaches the firmware. */
+	reset(false);
+	cam.format.capture_size = CAM_CAPTURE_SIZE + 1;
+	assert(stream_on() == -EIO && !worker_runs && !caller_steps && !cam_dead(&cam));
+	assert(cam.state == CAM_IDLE && returned == VB2_BUF_STATE_QUEUED && !strcmp(events, "r"));
+	assert(cam.geometry.capture_size == CAM_CAPTURE_SIZE && !strcmp(dead_reason, "none"));
+}
+
 int main(void)
 {
 	caller_task_fails();
@@ -646,6 +682,7 @@ int main(void)
 	shutdown_with_signal();
 	worker_failures();
 	no_worker_needed();
+	format_latch_and_output_rejection();
 	puts("lifecycle tests passed: signalled STREAMOFF/STREAMON/shutdown complete on the worker, coded RTKit reasons, lock ownership");
 	return 0;
 }

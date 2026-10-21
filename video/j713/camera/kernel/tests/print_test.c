@@ -34,6 +34,7 @@ struct cam_device {
 	bool fw_lock, print_failed, transport_dead, firmware_started, dead;
 	u32 print_cursor, banners;
 	struct completion ready;
+	struct { struct cam_output_evidence output; } session;
 };
 struct ratelimit_state {
 	unsigned int interval, burst, used;

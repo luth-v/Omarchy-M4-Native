@@ -3,15 +3,20 @@
 
 #include "j713_cam.h"
 
-static void cam_format(struct v4l2_pix_format *pix)
+/* 1920x1080 only when the probe's claim holds its capture pool. */
+static void cam_format(const struct cam_device *cam, struct v4l2_pix_format *pix)
 {
+	bool hd = cam->capture_span == CAM_CAPTURE_MAX && pix->width == 1920 && pix->height == 1080;
+	u32 width = hd ? 1920 : CAM_FRAME_WIDTH;
+	u32 height = hd ? 1080 : CAM_DELIVER_HEIGHT;
+
 	*pix = (struct v4l2_pix_format) {
-		.width = CAM_FRAME_WIDTH,
-		.height = CAM_DELIVER_HEIGHT,
+		.width = width,
+		.height = height,
 		.pixelformat = V4L2_PIX_FMT_NV12,
 		.field = V4L2_FIELD_NONE,
-		.bytesperline = CAM_FRAME_WIDTH,
-		.sizeimage = CAM_DELIVER_SIZE,
+		.bytesperline = width,
+		.sizeimage = width * height * 3 / 2,
 		.colorspace = V4L2_COLORSPACE_REC709,
 		.xfer_func = V4L2_XFER_FUNC_709,
 		.ycbcr_enc = V4L2_YCBCR_ENC_709,
@@ -37,7 +42,17 @@ static int cam_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *fmt)
 
 static int cam_get_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 {
-	cam_format(&fmt->fmt.pix);
+	struct cam_device *cam = video_drvdata(file);
+
+	fmt->fmt.pix.width = cam->format.width;
+	fmt->fmt.pix.height = cam->format.deliver_height;
+	cam_format(cam, &fmt->fmt.pix);
+	return 0;
+}
+
+static int cam_try_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+{
+	cam_format(video_drvdata(file), &fmt->fmt.pix);
 	return 0;
 }
 
@@ -47,16 +62,21 @@ static int cam_set_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 
 	if (vb2_is_busy(&cam->queue))
 		return -EBUSY;
-	return cam_get_fmt(file, priv, fmt);
+	cam_try_fmt(file, priv, fmt);
+	cam_geometry_init(&cam->format, fmt->fmt.pix.height == 1080 ? 1888 : cam->out_height);
+	return 0;
 }
 
 static int cam_enum_sizes(struct file *file, void *priv, struct v4l2_frmsizeenum *size)
 {
-	if (size->index || size->pixel_format != V4L2_PIX_FMT_NV12)
+	struct cam_device *cam = video_drvdata(file);
+
+	if (size->index > (cam->capture_span == CAM_CAPTURE_MAX ? 1U : 0U) ||
+	    size->pixel_format != V4L2_PIX_FMT_NV12)
 		return -EINVAL;
 	size->type = V4L2_FRMSIZE_TYPE_DISCRETE;
-	size->discrete.width = CAM_FRAME_WIDTH;
-	size->discrete.height = CAM_DELIVER_HEIGHT;
+	size->discrete.width = size->index ? 1920 : CAM_FRAME_WIDTH;
+	size->discrete.height = size->index ? 1080 : CAM_DELIVER_HEIGHT;
 	return 0;
 }
 
@@ -66,9 +86,13 @@ static int cam_enum_intervals(struct file *file, void *priv, struct v4l2_frmival
 	unsigned int mode = vb2_is_streaming(&cam->queue) ?
 		cam->session.experiment.config.fps : cam_fps_mode();
 
+	/* 1920x1080 offers 30 fps only, in every mode. */
+	if (interval->width == 1920 && interval->height == 1080)
+		mode = 30;
 	if (interval->index > (mode == 1 ? 1 : 0) ||
 	    interval->pixel_format != V4L2_PIX_FMT_NV12 ||
-	    interval->width != CAM_FRAME_WIDTH || interval->height != CAM_DELIVER_HEIGHT)
+	    !cam_deliver_size_valid(interval->width, interval->height,
+				    cam->capture_span == CAM_CAPTURE_MAX))
 		return -EINVAL;
 	interval->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 	interval->discrete = (struct v4l2_fract) {
@@ -88,6 +112,9 @@ static int cam_parm(struct file *file, void *priv, struct v4l2_streamparm *parm)
 		rate = cam->session.experiment.frame_rate ?: 30;
 	else
 		rate = mode == 1 ? (cam->frame_rate ?: 30) : (mode ?: 30);
+	/* 1080p reports 30; a follow-mode 60 selection is kept for 720p. */
+	if (cam->format.width == 1920)
+		rate = 30;
 	memset(&parm->parm.capture, 0, sizeof(parm->parm.capture));
 	parm->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
 	parm->parm.capture.timeperframe = (struct v4l2_fract) { 1, rate };
@@ -137,10 +164,12 @@ static int cam_set_input(struct file *file, void *priv, unsigned int input)
 static int cam_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 			   unsigned int *planes, unsigned int sizes[], struct device *devices[])
 {
+	struct cam_device *cam = vb2_get_drv_priv(queue);
+
 	if (*planes)
-		return *planes != 1 || sizes[0] < CAM_DELIVER_SIZE ? -EINVAL : 0;
+		return *planes != 1 || sizes[0] < cam->format.deliver_size ? -EINVAL : 0;
 	*planes = 1;
-	sizes[0] = CAM_DELIVER_SIZE;
+	sizes[0] = cam->format.deliver_size;
 	return 0;
 }
 
@@ -155,9 +184,11 @@ static int cam_buffer_init(struct vb2_buffer *buffer)
 
 static int cam_buffer_prepare(struct vb2_buffer *buffer)
 {
-	if (vb2_plane_size(buffer, 0) < CAM_DELIVER_SIZE || !vb2_plane_vaddr(buffer, 0))
+	struct cam_device *cam = vb2_get_drv_priv(buffer->vb2_queue);
+
+	if (vb2_plane_size(buffer, 0) < cam->format.deliver_size || !vb2_plane_vaddr(buffer, 0))
 		return -EINVAL;
-	vb2_set_plane_payload(buffer, 0, CAM_DELIVER_SIZE);
+	vb2_set_plane_payload(buffer, 0, cam->format.deliver_size);
 	return 0;
 }
 
@@ -208,6 +239,17 @@ void cam_deliver(struct cam_device *cam, unsigned int slot, u64 timestamp)
 		session->dropped++;
 		return;
 	}
+	/* A late firmware replacement must never be copied with the old layout. */
+	if (session->output.rejected) {
+		dev_info(cam->dev, "1080p: firmware output rejected during capture\n");
+		session->output_rejected = true;
+		session->stop_requested = true;
+		session->dropped++;
+		vb2_buffer_done(&buffer->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+		/* No more buffers will complete: let the app stop and restart. */
+		vb2_queue_error(&cam->queue);
+		return;
+	}
 	source = cam_pointer(cam, cam->capture_base + CAM_RENDER_OFFSET +
 			      slot * cam->geometry.frame_stride, cam->geometry.frame_stride);
 	dest = vb2_plane_vaddr(&buffer->vb.vb2_buf, 0);
@@ -221,13 +263,13 @@ void cam_deliver(struct cam_device *cam, unsigned int slot, u64 timestamp)
 	dma_rmb();
 	cam_crop_copy(&cam->geometry, dest, source);
 	if (READ_ONCE(cam->auto_white_balance))
-		cam_white_balance(&session->wb, dest);
+		cam_white_balance(&cam->geometry, &session->wb, dest);
 	session->copy_ns += ktime_get_ns() - start;
 	session->delivered++;
 	buffer->vb.vb2_buf.timestamp = timestamp;
 	buffer->vb.sequence = sequence;
 	buffer->vb.field = V4L2_FIELD_NONE;
-	vb2_set_plane_payload(&buffer->vb.vb2_buf, 0, CAM_DELIVER_SIZE);
+	vb2_set_plane_payload(&buffer->vb.vb2_buf, 0, cam->geometry.deliver_size);
 	vb2_buffer_done(&buffer->vb.vb2_buf, VB2_BUF_STATE_DONE);
 	start = ktime_get_ns();
 	if (session->delivered > 1) {
@@ -246,10 +288,13 @@ static int cam_start_streaming(struct vb2_queue *queue, unsigned int count)
 	struct cam_device *cam = vb2_get_drv_priv(queue);
 	int ret = -EIO;
 
-	if (cam_dead(cam) || READ_ONCE(cam->shutting_down))
+	/* Never start a layout that the probe-time claim cannot hold. */
+	if (cam_dead(cam) || READ_ONCE(cam->shutting_down) ||
+	    cam->format.capture_size > cam->capture_span)
 		goto failed;
 	cancel_delayed_work_sync(&cam->idle_work);
 	cam_set_state(cam, CAM_STREAMING);
+	cam->geometry = cam->format;
 	if (!cam->firmware_running) {
 		ret = cam_lifecycle(cam, cam_boot);
 		if (ret)
@@ -263,6 +308,10 @@ static int cam_start_streaming(struct vb2_queue *queue, unsigned int count)
 	schedule_delayed_work(&cam->idle_work, HZ);
 	return 0;
 failed:
+	if (cam->session.output_rejected && !cam_dead(cam)) {
+		cam_lifecycle(cam, cam_fw_stop);
+		cam_set_state(cam, CAM_IDLE);
+	}
 	cam_return_buffers(cam, VB2_BUF_STATE_QUEUED);
 	return ret;
 }
@@ -318,7 +367,7 @@ static const struct v4l2_ioctl_ops cam_ioctl_ops = {
 	.vidioc_querycap = cam_querycap,
 	.vidioc_enum_fmt_vid_cap = cam_enum_fmt,
 	.vidioc_g_fmt_vid_cap = cam_get_fmt,
-	.vidioc_try_fmt_vid_cap = cam_get_fmt,
+	.vidioc_try_fmt_vid_cap = cam_try_fmt,
 	.vidioc_s_fmt_vid_cap = cam_set_fmt,
 	.vidioc_enum_framesizes = cam_enum_sizes,
 	.vidioc_enum_frameintervals = cam_enum_intervals,

@@ -428,6 +428,62 @@ int cam_channel_input(struct cam_device *cam, u16 opcode, u32 value, bool argume
 	return cam_io(cam, argument ? 0x10 : 0xc, 0);
 }
 
+static int cam_output_reject(struct cam_device *cam, const char *when, int result)
+{
+	const struct cam_output_evidence *e = &cam->session.output;
+
+	cam->session.output_rejected = true;
+	dev_info(cam->dev, "1080p: firmware output rejected %s: result=%d seen=%u size=%ux%u replaced=%u dropped=%u\n",
+		 when, result, e->seen, e->width, e->height, e->replaced, e->dropped);
+	return -ERANGE;
+}
+
+/* Require the firmware's observed 0xb01 print (see cam_output_record).
+ * Missing, mismatched or lost evidence, a replacement print
+ * or a replied rejection fails closed. No unverified GET opcode is sent.
+ */
+static int cam_output_configure(struct cam_device *cam)
+{
+	struct cam_output_evidence *e = &cam->session.output;
+	int ret, result;
+
+	if (cam->geometry.width != 1920)
+		return cam_io(cam, 0x38, 0);
+	cam_print_drain(cam);
+	*e = (struct cam_output_evidence) { .watching = true };
+	ret = cam_experiment_exchange(cam, 0x38, 0, &result);
+	if (cam_dead(cam) || (ret && ret != -EPROTO))
+		return ret ?: -EIO;
+	/* Drain prints published after the reply as well as those during it. */
+	if (!ret)
+		cam_delay(cam, 100);
+	cam_print_drain(cam);
+	if (cam_dead(cam))
+		return -EIO;
+	if (ret || !e->seen || e->rejected)
+		return cam_output_reject(cam, "at 0xb01", ret);
+	return 0;
+}
+
+/* Recheck before and after the first capture list; only then is it accepted. */
+int cam_output_verify(struct cam_device *cam, bool final)
+{
+	struct cam_output_evidence *e = &cam->session.output;
+
+	if (!e->watching)
+		return 0;
+	cam_print_drain(cam);
+	if (cam_dead(cam))
+		return -EIO;
+	if (e->rejected || !e->seen)
+		return cam_output_reject(cam, final ? "after the capture list" : "before capture", 0);
+	if (final) {
+		e->accepted = true;
+		dev_info(cam->dev, "1080p: firmware output accepted %ux%u\n", e->width, e->height);
+	}
+	return 0;
+}
+
 int cam_configure_buffers(struct cam_device *cam)
 {
 	const struct cam_geometry *g = &cam->geometry;
@@ -455,7 +511,7 @@ int cam_configure_buffers(struct cam_device *cam)
 	put_unaligned_le32(g->width, command + 0x20);
 	put_unaligned_le32(g->height, command + 0x2c);
 	put_unaligned_le32(g->width, command + 0x34);
-	ret = cam_io(cam, 0x38, 0);
+	ret = cam_output_configure(cam);
 	if (ret)
 		return ret;
 	for (i = 0; i < ARRAY_SIZE(pools); i++) {

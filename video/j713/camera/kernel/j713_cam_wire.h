@@ -31,6 +31,7 @@
 /* Stage D uses the extended M4 configuration size. */
 #define CAM_CAMERA_CONFIG_SIZE 0x120
 #define CAM_CAPTURE_SIZE 0x800000UL
+#define CAM_CAPTURE_MAX 0xdc0000UL
 #define CAM_SETFILE_MAX 0x10000UL
 #define CAM_SETFILE_SIZE 0x6ff4UL
 #define CAM_LENSCAL_RECORD 0x6fbcUL
@@ -53,6 +54,8 @@
 #define CAM_DELIVER_Y (CAM_FRAME_WIDTH * CAM_DELIVER_HEIGHT)
 #define CAM_DELIVER_SIZE (CAM_DELIVER_Y * 3 / 2)
 #define CAM_ALIGN16K(value) (((value) + 0x3fffUL) & ~0x3fffUL)
+#define CAM_POOL_END_W(width, height) (CAM_RENDER_OFFSET + CAM_FRAME_COUNT * \
+	(CAM_ALIGN16K((width) * (height)) + CAM_ALIGN16K((width) * (height) / 2)))
 #define CAM_Y_SPAN(height) CAM_ALIGN16K(CAM_FRAME_WIDTH * (height))
 #define CAM_UV_SPAN(height) CAM_ALIGN16K(CAM_FRAME_WIDTH * (height) / 2)
 #define CAM_POOL_END(height) (CAM_RENDER_OFFSET + CAM_FRAME_COUNT * \
@@ -209,25 +212,83 @@ static inline u64 cam_ipc_iova(u64 address)
  */
 struct cam_geometry {
 	u32 width, height, y_size, uv_size;
-	size_t y_span, uv_span, frame_stride, pool_end;
+	u32 deliver_height, deliver_y, deliver_size;
+	size_t y_span, uv_span, frame_stride, pool_end, capture_size;
 	u32 crop_y, crop_uv;
 };
 
 static inline bool cam_geometry_init(struct cam_geometry *g, u32 height)
 {
-	if (height != 720 && height != 1264)
+	u32 width = height == 1888 ? 1920 : CAM_FRAME_WIDTH;
+	u32 deliver = height == 1888 ? 1080 : CAM_DELIVER_HEIGHT;
+
+	if (height != 720 && height != 1264 && height != 1888)
 		return false;
 	*g = (struct cam_geometry) {
-		.width = CAM_FRAME_WIDTH, .height = height,
-		.y_size = CAM_FRAME_WIDTH * height,
-		.uv_size = CAM_FRAME_WIDTH * height / 2,
-		.y_span = CAM_Y_SPAN(height), .uv_span = CAM_UV_SPAN(height),
-		.frame_stride = CAM_Y_SPAN(height) + CAM_UV_SPAN(height),
-		.pool_end = CAM_POOL_END(height),
-		.crop_y = (height - CAM_DELIVER_HEIGHT) / 2,
-		.crop_uv = (height - CAM_DELIVER_HEIGHT) / 4,
+		.width = width, .height = height,
+		.deliver_height = deliver, .deliver_y = width * deliver,
+		.deliver_size = width * deliver * 3 / 2,
+		.y_size = width * height, .uv_size = width * height / 2,
+		.y_span = CAM_ALIGN16K(width * height),
+		.uv_span = CAM_ALIGN16K(width * height / 2),
+		.frame_stride = CAM_ALIGN16K(width * height) + CAM_ALIGN16K(width * height / 2),
+		.pool_end = CAM_POOL_END_W(width, height),
+		.capture_size = height == 1888 ? CAM_CAPTURE_MAX : CAM_CAPTURE_SIZE,
+		.crop_y = (height - deliver) / 2,
+		.crop_uv = (height - deliver) / 4,
 	};
 	return true;
+}
+
+/* 1920x1080 exists only when the probe's claim holds CAM_CAPTURE_MAX. */
+static inline bool cam_deliver_size_valid(u32 width, u32 height, bool hd)
+{
+	return (width == 1280 && height == 720) || (hd && width == 1920 && height == 1080);
+}
+
+/* Firmware evidence for one 1080p session, collected while draining prints.
+ * Every logged 0xb01 printed "[MSC] CH = 0x0 BES[0] originalOutputSize [W H]"
+ * before its reply; the "ch=..,BESType=.." format is never printed. A lost
+ * record rejects only until the gate has accepted the session.
+ */
+struct cam_output_evidence {
+	bool watching, accepted, seen, rejected, replaced, dropped;
+	u32 width, height;
+};
+
+static inline void cam_output_record(struct cam_output_evidence *e,
+				     const struct cam_print_record *record)
+{
+	char text[sizeof(record->text) + 1];
+	unsigned int channel, bes, width, height;
+	const char *line;
+	int used = 0;
+
+	if (!e->watching)
+		return;
+	if (le16_to_cpu(record->dropped) && !e->accepted)
+		e->rejected = e->dropped = true;
+	if (le16_to_cpu(record->kind))
+		return;
+	memcpy(text, record->text, sizeof(record->text));
+	text[sizeof(record->text)] = 0;
+	if (strstr(text, "MaxFESOutput") && strstr(text, "Replaced"))
+		e->rejected = e->replaced = true;
+	line = strstr(text, "] CH = 0x");
+	if (!line || sscanf(line, "] CH = 0x%x BES[%u] originalOutputSize [%u %u]%n",
+			    &channel, &bes, &width, &height, &used) != 4 || !used || channel || bes)
+		return;
+	e->seen = true;
+	e->width = width;
+	e->height = height;
+	if (width != 1920 || height != 1888)
+		e->rejected = true;
+	/* The firmware's other variant appends ", actual [W H]"; it must agree. */
+	line += used;
+	if (!strncmp(line, ", actual [", 10) &&
+	    (sscanf(line, ", actual [%u %u]", &width, &height) != 2 ||
+	     width != 1920 || height != 1888))
+		e->rejected = true;
 }
 
 static inline bool cam_buffer_index(const struct cam_geometry *g, u64 base,
@@ -236,7 +297,7 @@ static inline bool cam_buffer_index(const struct cam_geometry *g, u64 base,
 	u64 address = cam_ipc_iova(le64_to_cpu(buffer->iova[0]));
 	u32 planes = le32_to_cpu(buffer->planes);
 
-	if (base > ~0ULL - CAM_CAPTURE_SIZE)
+	if (base > ~0ULL - g->capture_size)
 		return false;
 	switch (le32_to_cpu(buffer->type)) {
 	case 0:
@@ -471,23 +532,24 @@ static inline void cam_wb_lut(u8 *lut, int offset)
 
 static inline void cam_crop_copy(const struct cam_geometry *g, u8 *dest, const u8 *source)
 {
-	memcpy(dest, source + g->crop_y * g->width, CAM_DELIVER_Y);
-	memcpy(dest + CAM_DELIVER_Y, source + g->y_span + g->crop_uv * g->width,
-	       CAM_DELIVER_Y / 2);
+	memcpy(dest, source + g->crop_y * g->width, g->deliver_y);
+	memcpy(dest + g->deliver_y, source + g->y_span + g->crop_uv * g->width,
+	       g->deliver_y / 2);
 }
 
 /* Sample the cached crop before applying the correction. Means use Q8. */
-static inline void cam_white_balance(struct cam_white_balance *wb, u8 *frame)
+static inline void cam_white_balance(const struct cam_geometry *g,
+				    struct cam_white_balance *wb, u8 *frame)
 {
 	u8 lut_u[256], lut_v[256];
-	u8 *uv = frame + CAM_DELIVER_Y;
+	u8 *uv = frame + g->deliver_y;
 	u32 sum_u = 0, sum_v = 0, count = 0;
 	unsigned int row, column, i;
 	int u, v;
 
-	for (row = 4; row < CAM_DELIVER_HEIGHT; row += 8) {
-		for (column = 4; column < CAM_FRAME_WIDTH; column += 8) {
-			i = row / 2 * CAM_FRAME_WIDTH + column;
+	for (row = 4; row < g->deliver_height; row += 8) {
+		for (column = 4; column < g->width; column += 8) {
+			i = row / 2 * g->width + column;
 			sum_u += uv[i];
 			sum_v += uv[i + 1];
 			count++;
@@ -505,7 +567,7 @@ static inline void cam_white_balance(struct cam_white_balance *wb, u8 *frame)
 	}
 	cam_wb_lut(lut_u, 128 - wb->u / 256);
 	cam_wb_lut(lut_v, 128 - wb->v / 256);
-	for (i = 0; i < CAM_DELIVER_Y / 2; i += 2) {
+	for (i = 0; i < g->deliver_y / 2; i += 2) {
 		uv[i] = lut_u[uv[i]];
 		uv[i + 1] = lut_v[uv[i + 1]];
 	}
@@ -532,6 +594,9 @@ _Static_assert(CAM_CAPMETA_OFFSET + CAM_META_COUNT * CAM_CAPMETA_STRIDE ==
 	       CAM_RENDER_OFFSET, "capture metadata pool");
 _Static_assert(CAM_POOL_END(720) <= CAM_CAPTURE_SIZE, "720 pool");
 _Static_assert(CAM_POOL_END(1264) <= CAM_CAPTURE_SIZE, "1264 pool");
+_Static_assert(CAM_POOL_END_W(1920, 1888) == 0xda8000, "1888 pool");
+_Static_assert(CAM_ALIGN16K(CAM_POOL_END_W(1920, 1888)) + CAM_SETFILE_MAX <= CAM_CAPTURE_MAX,
+	       "1888 setfile");
 /* The blob sits at the 16 KiB-aligned pool end, as cam_setfile_stage places it. */
 _Static_assert(CAM_ALIGN16K(CAM_POOL_END(720)) + CAM_SETFILE_MAX <= CAM_CAPTURE_SIZE,
 	       "720 setfile");

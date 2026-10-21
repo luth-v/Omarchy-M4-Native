@@ -30,7 +30,10 @@
 #define CAM_FW_END (CAM_CODE_SIZE + CAM_DATA_SIZE)
 #define CAM_HEAP_END 0x2000000UL
 #define CAM_SHMEM_SIZE SZ_16M
+/* The 82f9fd25 claim; probe adds the 1080p tail only where it also fits. */
 #define CAM_IDENTITY_SIZE (CAM_EXTRA_SIZE + CAM_ARENA_SIZE + CAM_CAPTURE_SIZE)
+#define CAM_IDENTITY_MAX (CAM_EXTRA_SIZE + CAM_ARENA_SIZE + CAM_CAPTURE_MAX)
+#define CAM_IDENTITY_SPAN(cam) (CAM_EXTRA_SIZE + CAM_ARENA_SIZE + (cam)->capture_span)
 #define CAM_SHARED_VA_END 0xf6000000ULL
 #define CAM_ALL_META ((1U << CAM_META_COUNT) - 1)
 #define CAM_ALL_IMAGES ((1U << CAM_FRAME_COUNT) - 1)
@@ -58,6 +61,8 @@ struct cam_experiment {
 
 struct cam_session {
 	struct cam_experiment experiment;
+	struct cam_output_evidence output;
+	bool output_rejected;
 	struct cam_returned returned;
 	u32 completed;
 	u32 acked_images, acked_meta, acked_capture;
@@ -109,7 +114,8 @@ struct cam_device {
 	bool auto_white_balance, alias_fix;
 	unsigned int sessions, fw_starts, fw_sessions;
 	unsigned int frame_rate;
-	struct cam_geometry geometry;
+	struct cam_geometry geometry, format;
+	u32 out_height;
 	struct cam_session session;
 	struct cam_arena arena;
 	struct apple_rtkit *rtk;
@@ -124,6 +130,8 @@ struct cam_device {
 	unsigned int mmio_mapped;
 	struct page *claim_pages;
 	unsigned long claim_count;
+	/* CAM_CAPTURE_SIZE, or CAM_CAPTURE_MAX when 1080p fits the claim. */
+	size_t capture_span;
 	u64 window_base, arena_base, capture_base, bt_iova;
 	size_t bt_size;
 	/* Wait queues have device lifetime; session reset only clears data. */
@@ -194,6 +202,7 @@ int cam_framing_requeue(struct cam_device *cam);
 int cam_select(struct cam_device *cam);
 int cam_current(struct cam_device *cam);
 int cam_configure_buffers(struct cam_device *cam);
+int cam_output_verify(struct cam_device *cam, bool final);
 int cam_channel_input(struct cam_device *cam, u16 opcode, u32 value, bool argument);
 int cam_metadata(struct cam_device *cam);
 int cam_capture(struct cam_device *cam);
