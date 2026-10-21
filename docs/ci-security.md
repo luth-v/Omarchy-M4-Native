@@ -6,7 +6,9 @@ releases. Neither a PR merge nor CI automatically publishes an installer.
 ## Where checks run and cost
 
 All workflows use **standard GitHub-hosted runners** (`ubuntu-24.04` and
-`macos-14`). No self-hosted runner, hardware access, personal login, repository
+`macos-14`). The package job stays on `ubuntu-24.04` and packages the pinned
+APFS helper built out of band; the Linux regression job separately compiles
+the reader from checksummed source archives as a test. No self-hosted runner, hardware access, personal login, repository
 secret or paid scanning service is required. Standard hosted runners are free
 for public repositories. While private, ordinary Actions use the account's
 private-repository allowance; CodeQL and dependency review explicitly wait for

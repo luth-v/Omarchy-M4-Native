@@ -12,13 +12,14 @@ reviewers.
 | Package | Installs | Version at launch |
 | --- | --- | --- |
 | `omarchy-m4-keyring` | The channel's public signing key for `pacman-key` | `20261012-1` |
-| `omarchy-m4-boot` | `m4-boot-compose`, its pacman hook, the J713 devicetree, update notifier and guarded hardware dependencies | `1-1`; `1-14` brings native brightness and both handoff-aware notch loaders |
+| `omarchy-m4-boot` | `m4-boot-compose`, its pacman hook, the J713 devicetree, update notifier and guarded hardware dependencies | `1-1`; `1-14` brings native brightness and both handoff-aware notch loaders; `1-20` also requires the camera |
 | `linux-m4-omarchy` | The J713 kernel image and its modules | `7.1.9.m4.20261008-2` |
 | `omarchy-m4-gst-audio` | GStreamer's `autodetect` and `pulse` sinks in `/usr/lib/gstreamer-1.0`, for WebKitGTK and GStreamer apps | `1.28.7-1` |
 | `omarchy-m4-headphones` | The headphone jack card: two pinned modules, `m4-headphones`, its registration drop-in, UCM and WirePlumber files | `1-1`; `1-2` adds the headset microphone |
 | `omarchy-m4-cpu` | The CPU idle driver: one pinned module, `m4-cpu-idle` and its boot unit | `1-1`; `1-4` survives a clean stop during the settle period |
 | `omarchy-m4-evdi` | DisplayLink's evdi module and `libevdi`, for USB display adapters | `1.15.1-1` |
 | `omarchy-m4-backlight` | Native DCP backlight module, guarded startup, brightness-key routing and OSD | `1-1` |
+| `omarchy-m4-camera` | The J713 V4L2 camera, bounded APFS reader, qualified owner-data extractor and guarded boot service | `1-3`, brought by `omarchy-m4-boot` `1-20`; packaged boot loading observed on the contributor's boot chain |
 
 ### omarchy-m4-boot 1-4 and omarchy-m4-gst-audio 1.28.7-1
 
@@ -364,6 +365,56 @@ file.
   were confirmed. No suspend, other-board or native external-display support
   is claimed.
 
+### omarchy-m4-camera 1-3 and omarchy-m4-boot 1-20
+
+The [J713 built-in camera](j713-camera.md) defaults to NV12 1280x720, with
+optional 1920x1080 at 30 fps when its boot claim gets the extra 5.75 MiB
+tail. Production defaults are colour 1, framing 2 and FPS follow mode;
+1080p clamps to 30 fps. `omarchy-m4-boot` 1-20
+requires it, so existing owners receive it through `omarchy-m4-update` even
+with an older setup script. Installation enables its guarded boot service;
+loading waits for the next boot. Power off fully after updating.
+
+The two modules are staged under `/usr/lib/omarchy-m4/j713-camera/`, pinned
+in `camera_modules`, and built from `video/j713/camera/kernel/` with
+`tools/build-j713-camera.sh`. The qualified ISP code list initially contains
+only CRC `aaafbaa6`. Unknown firmware or missing owner tuning leaves the
+camera unloaded. The service has one exact protected-path exception; it
+never changes the speaker service.
+
+The package contains no Apple proprietary data. The macOS installer and Linux update
+extract the pinned sensor record from the owner's `/usr/sbin/appleh16camerad`.
+The Linux path uses a separate, bounded ApfsLib helper built from pinned
+apfs-fuse and lzfse sources with a read-only patch. It passes validated
+internal-SSD descriptors, skips keybags and encrypted/non-System trees, and
+tries System snapshots before live trees. It has no FUSE or `7zip` dependency
+and performs no mounts or partition writes. The helper runs as `nobody` with
+`no_new_privs`, no capabilities and no extra groups, using the already-open
+read-only descriptor. Refusals exclude only their source; timeouts and output
+caps remain hard failures. Only the pinned record qualifies.
+
+As with libevdi and the GStreamer plugins, build the helper out of band and
+upload the pinned bytes to `package-inputs`; channel builds on `ubuntu-24.04`
+only package them. The [reader recipe](../video/j713/camera/apfs-reader/README.md)
+records its cross toolchain, exact source archives and reproduction commands.
+Mirror both upstream archives and retain the read-only patch and build files
+at the joined source commit. The channel publisher includes the tracked camera
+sources, kernel-input manifest and reader recipe, patch and toolchain manifests
+in its signed integration source archive. It does not upload the separately
+pinned source archives or media-exports table; retain those inputs separately.
+Channel packaging preserves the qualified helper and module bytes.
+`sudo m4-camera --disable` keeps the package current and holds future
+loads until `--enable`. On a MacBook Air M4 with macOS 26.6.2 / 25G83,
+package `1-2`, SHA256
+`3d22d60bb9d86b39e0faa0455bd950a2f7296da2aa4880854aab4c8d2266f3d5`,
+recovered the removed qualified record before reboot. The installed helper was
+`cc9e96b8854005154e0f49d6aaa630dd9276d4d99ab9b23777b385dd9551e225`;
+the recovered record was root:root 0644, 28,660 bytes, SHA256
+`1e25d89b7acc3b62fcb64c5102503ba289c3cb000ca6abe812c3249ac6349f77`.
+The service was enabled. Restricted helper inspection completed without
+refusal reasons on internal APFS partitions p1, p2, p3 and p7; see the
+[camera evidence](j713-camera.md#owner-tuning-and-firmware-qualification)
+for the volumes.
 
 ### Retained bounds candidate: boot 1-19 and speaker 1-5
 
@@ -682,6 +733,37 @@ first. Joins stay `unverified` until a byte-identical rebuild is recorded:
   `display/j713/backlight/` and the prepared alpha.1 kernel-controller tree
   with Ubuntu clang 21.1.8; compared byte for byte. Imported AFK notices and
   GPL/MIT license texts are installed with the package.
+- **Camera modules (`omarchy-m4-camera`):** `j713_isp_cam.ko` (`ddcdf324…`)
+  and `j713_isp_d_dt.ko` (`c6d115ec…`), built from
+  `video/j713/camera/kernel/` with `tools/build-j713-camera.sh` against the
+  pinned alpha.1 kernel. `source/reference-media-exports.symvers`
+  (`ae0764ef…`) supplies the matching release's media-only symbol exports.
+  Independent offline clean builds reproduced both modules. The source joins
+  record their exact source commit and inputs. On the contributor's MacBook
+  Air M4 on 2026-10-21, package `1-1`'s boot service loaded these same module
+  bytes. Both 720p and 1080p captures delivered 150/150 frames with zero
+  drops; copy averages were 2177 and 4894 µs, with pacing averages of
+  33113 µs. The 1080p firmware output was 1920x1888, and 720p worked normally
+  afterwards. After a later power cycle with final package `1-3`
+  (`ce22df3b…`), the service loaded the same modules and Google Meet completed
+  three 720p sessions, pacing averages 32.3 to 33.3 ms, maximum 51.7 ms.
+  These runs used the contributor's own boot chain and original `20261008`
+  kernel build, without the retained-bounds rebuilt image from
+  [#157](https://github.com/Kb2uka/Omarchy-M4-Native/pull/157), channel
+  devicetree or new display handoff stage 2. The rebuilt image has the same
+  release and export pin; camera loading on it remains untested on hardware.
+  See [camera evidence](j713-camera.md#1080p-at-30-fps). No Apple bytes are
+  release inputs.
+- **APFS camera reader (`omarchy-m4-camera`):** `m4-apfs-reader-cc9e96b8`,
+  SHA256 `cc9e96b8854005154e0f49d6aaa630dd9276d4d99ab9b23777b385dd9551e225`,
+  built out of band with `video/j713/camera/apfs-reader/build.sh` and the
+  recorded Clang/ALARM cross toolchain. Three clean builds reproduced it.
+  Its `rebuilt-identical` join names the reader sources and the apfs-fuse
+  `66b86bd…` and lzfse `e634ca58…` archives mirrored in `package-inputs`.
+  The maintainer must upload the helper and both archives alongside the two
+  camera module inputs and `source/reference-media-exports.symvers`.
+  On the Air, package `1-2` (`3d22d60b…`) recovered the removed qualified
+  record before reboot using this exact helper (`cc9e96b8…`).
 - **USB display support (`omarchy-m4-evdi`):** `evdi.ko` (`c5e65a2b…`), built
   on the alpha.1 kernel tree, and `libevdi` (`0f1da52d…`), built for aarch64,
   both from DisplayLink's unchanged `evdi-1.15.1.tar.gz` (`b120df30…`, mirrored

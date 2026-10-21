@@ -160,6 +160,7 @@ once applies them:
 | Opt-in: the desktop uses the whole 2560x1664 panel, with the bar's widgets left and right of the camera ([#89](https://github.com/Kb2uka/Omarchy-M4-Native/issues/89)); `sudo m4-notch --show`, then restart; `sudo m4-notch --hide` goes back ([details](docs/j713-notch.md)) | `omarchy-m4-boot` 1-12 |
 | Kernel support for DisplayLink USB adapters and docks; a virtual display was tested, but no physical adapter is qualified yet. **For hardware testing, one extra step:** `yay -S displaylink`, then `sudo systemctl enable --now displaylink.service` (Synaptics' DisplayLinkManager is closed source, so the update cannot ship it). Plain USB-C to HDMI/DisplayPort adapters, USB-C and Thunderbolt monitors, and Thunderbolt dock display ports still do not work ([#58](https://github.com/Kb2uka/Omarchy-M4-Native/issues/58), [details](docs/j713-external-displays.md)) | `omarchy-m4-evdi` 1.15.1-1, `omarchy-m4-boot` 1-13 |
 | Native J713 panel brightness with the brightness keys and normal OSD; starts after the next restart and preserves active custom key bindings ([#146](https://github.com/Kb2uka/Omarchy-M4-Native/pull/146), [details](docs/package-channel.md#omarchy-m4-backlight-1-1-and-omarchy-m4-boot-1-14)) | `omarchy-m4-backlight` 1-1, `omarchy-m4-boot` 1-14 |
+| Built-in J713 camera, default NV12 1280x720 and optional 1920x1080 at 30 fps; power off after updating; packaged boot loading observed on the contributor's boot chain ([details](docs/j713-camera.md)) | `omarchy-m4-camera` 1-3, `omarchy-m4-boot` 1-20 |
 
 A devicetree you applied by hand from the guides is kept; the update never
 moves an Air back to an older one. An Air connected before
@@ -197,7 +198,8 @@ As of October 11, 2026, with the pinned experimental runtime:
 | Known video issue | A tested 1080p60 browser video dropped roughly 47% of frames in a normal window; the fullscreen comparison reported 1 drop in 1,804 frames. This geometry-dependent problem remains open. Fullscreen is a tested discriminator, not a universal fix. |
 | USB-C ports | The hinge-side port works in alpha.1. With `omarchy-m4-boot` 1-12 from `omarchy-m4-update`, the front port works too: the same SuperSpeed drive enumerated and read cleanly on both (October 16). Alternate modes and broad peripheral coverage are not qualified. |
 | External displays | A USB-C or Thunderbolt monitor shows nothing: the M4's display coprocessor (DCP) firmware is not supported by Linux yet. With `omarchy-m4-evdi`, Hyprland drew a virtual DisplayLink-style monitor at 60 Hz (October 17); no physical DisplayLink adapter is qualified yet ([details](docs/j713-external-displays.md)). |
-| Camera, suspend/resume, battery life | Not qualified for release. |
+| Camera | The reviewed out-of-tree driver was validated on one J713 with ISP CRC `aaafbaa6`: NV12 1280x720 / 30 fps in PipeWire and browsers, and 1920x1080 / 30 fps in a 150-frame capture and a live preview. 1080p appears only when the boot claim got its extra memory tail. `omarchy-m4-camera` ports it into the update channel. The packaged modules also delivered 150/150 frames at both sizes with zero drops on the contributor's Air. Final package `1-3` recovered owner tuning and loaded the same modules after a power cycle, followed by three 720p Meet sessions. These results used the original kernel build and contributor's boot chain; the retained-bounds rebuilt image, channel devicetree and new display stage 2 remain untested with this camera ([details](docs/j713-camera.md)). |
+| Suspend/resume, battery life | Not qualified for release. |
 
 These are observations from one machine and specific builds, not a statement
 about current upstream Asahi support or every M4 system. Good decoder counters
@@ -215,7 +217,7 @@ partitioning. The release assembler includes the exact approved
 [static J713 profile](audio/j713/filters/README.md) in the root image. Apple components, Widevine binaries and preset
 personal consent remain excluded.
 
-The camera, suspend/resume, broad hardware coverage
+Camera acceptance on the channel boot chain, suspend/resume, broad hardware coverage
 and coordinated updates remain open work. This alpha is not a daily-driver,
 safe-update or all-M4 compatibility promise. See the
 [source package guide](docs/release-source.md) for source/build boundaries.
